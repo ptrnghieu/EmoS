@@ -14,6 +14,8 @@ Usage (from the repository root, needs ffmpeg/ffprobe on PATH):
     python analysis/preprocess_chsims.py ... --limit 20   # quick check on a few clips
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import shutil
