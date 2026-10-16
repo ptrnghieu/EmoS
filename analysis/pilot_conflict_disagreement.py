@@ -8,39 +8,13 @@ Usage (from the repository root):
     python analysis/pilot_conflict_disagreement.py
 """
 
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1] / "datasets/data-final/datasets/ch-simsv2s"
-META = ROOT / "meta.csv"
-EMOS_BATCHES = {
-    "first": ROOT / "First-2500/analysis_outputs/basic7/annotated_with_ds.xlsx",
-    "last": ROOT / "Last-2500/analysis_outputs_after2500/basic7/annotated_with_ds.xlsx",
-}
+from chsims_emos import load_joined
 
 
-def load() -> pd.DataFrame:
-    meta = pd.read_csv(META, dtype={"video_id": str})
-    emos = pd.concat(
-        [pd.read_excel(path).assign(batch=name) for name, path in EMOS_BATCHES.items()]
-    )
-    for df in (meta, emos):
-        df["video_id"] = df["video_id"].astype(str)
-        df["clip_id"] = df["clip_id"].astype(int)
-    df = emos.merge(meta, on=["video_id", "clip_id"], suffixes=("", "_meta"))
-
-    sign_t, sign_a, sign_v = (np.sign(df[c]).astype(int) for c in ("label_T", "label_A", "label_V"))
-    sign_m = np.sign(df["label"]).astype(int)
-    df["conflict"] = ((sign_t != sign_a) | (sign_t != sign_v) | (sign_a != sign_v)).astype(int)
-    df["n_deviating"] = (sign_t != sign_m).astype(int) + (sign_a != sign_m).astype(int) + (sign_v != sign_m).astype(int)
-    for name, sign in (("T", sign_t), ("A", sign_a), ("V", sign_v)):
-        df[f"dev_{name}"] = (sign != sign_m).astype(int)
-    return df
-
-
-def agreement_table(df: pd.DataFrame, by: str) -> pd.DataFrame:
+def agreement_table(df: pd.DataFrame, by) -> pd.DataFrame:
     return df.groupby(by).agg(
         n=("unique_labels", "size"),
         all_agree=("unique_labels", lambda x: (x == 1).mean()),
@@ -61,8 +35,8 @@ def chi_square(table: pd.DataFrame) -> tuple[float, int]:
 def main() -> None:
     pd.set_option("display.width", 160)
     pd.set_option("display.max_columns", None)
-    df = load()
-    print(f"clips after join: {len(df)}  |  videos: {df.video_id.nunique()}  |  conflict rate: {df.conflict.mean():.3f}\n")
+    df = load_joined()
+    print(f"clips: {len(df)}  |  videos: {df.video_id.nunique()}  |  conflict rate: {df.conflict.mean():.3f}\n")
 
     print("Agreement by conflict (0 = all modalities share a polarity):")
     print(agreement_table(df, "conflict"), "\n")
