@@ -60,6 +60,7 @@ def chi_square(table: pd.DataFrame) -> tuple[float, int]:
 
 def main() -> None:
     pd.set_option("display.width", 160)
+    pd.set_option("display.max_columns", None)
     df = load()
     print(f"clips after join: {len(df)}  |  videos: {df.video_id.nunique()}  |  conflict rate: {df.conflict.mean():.3f}\n")
 
