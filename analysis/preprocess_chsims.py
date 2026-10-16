@@ -119,6 +119,9 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=None, help="only process the first N clips")
     args = parser.parse_args()
+    args.raw_dir = args.raw_dir.expanduser()
+    if not args.raw_dir.is_dir():
+        parser.error(f"--raw-dir {args.raw_dir} is not a folder")
 
     clips = load_joined()
     if args.limit:
@@ -134,6 +137,13 @@ def main() -> None:
     print(manifest["status"].value_counts().to_string())
     print(f"frames per clip: median {manifest['n_frames'].median():.0f}, max {manifest['n_frames'].max()}")
     print(f"wrote {args.out_dir / 'manifest.csv'} ({len(manifest)} clips)")
+
+    missing = manifest[manifest["status"] == "missing_video"]
+    if len(missing):
+        first = missing.iloc[0]
+        print(f"\n{len(missing)} clips not found. First one expected at:\n  {args.raw_dir / first['video_id'] / first['clip_id']}.mp4")
+        print(f"First entries of {args.raw_dir}: {sorted(p.name for p in args.raw_dir.iterdir())[:5]}")
+        print("--raw-dir must be the folder that directly holds video_0001/, aqgy3_0001/, ...")
 
 
 if __name__ == "__main__":
