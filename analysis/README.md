@@ -9,6 +9,8 @@ CH-SIMS v2(s) clips re-annotated in EmoS.
 | `pilot_conflict_disagreement.py` | Pilot: annotator agreement with vs. without cross-modal conflict |
 | `preprocess_chsims.py` | Extracts frames and 16 kHz audio from the raw clips and writes `manifest.csv` |
 | `../kaggle/benchmark_qwen25_omni.ipynb` | Speed and memory test of Qwen2.5-Omni-7B on Kaggle (2× T4) |
+| `../kaggle/run_qwen25_omni.ipynb` | Full run: label logits for all clips × 4 conditions, plus verbalized and per-modality generation on the test split; resumable |
+| `../kaggle/build_notebooks.py` | Builds both notebooks from shared cells: edit cells there, then run it |
 
 Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH` for preprocessing.
 
@@ -27,6 +29,9 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
 4. **Upload** `/path/to/chsims_mm` to Kaggle as a **private** dataset. CH-SIMS v2 media must not be redistributed.
 5. **Speed test**: open `kaggle/benchmark_qwen25_omni.ipynb` on Kaggle, add the dataset as input,
    set *Accelerator = GPU T4 x2* and *Internet = on*, then run all.
+6. **Full run**: same settings with `kaggle/run_qwen25_omni.ipynb`, using *Save Version → Save & Run All*.
+   It stops after `TIME_BUDGET_H` hours; to continue, add the notebook's own output as an input and
+   commit again. Results: `omni_runs/scores.jsonl` and `omni_runs/generations.jsonl`.
 
 ## Note on clip ids
 
