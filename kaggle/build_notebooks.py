@@ -590,6 +590,8 @@ measured speed and a projection.
         code(r"""
 # peft added for LoRA; the rest as in the other notebooks.
 %pip install -q "transformers==5.20.1" "qwen-omni-utils==0.0.9" "peft==0.21.2" audioread librosa
+# Kaggle ships torchao 0.10; peft 0.21 raises an ImportError for torchao < 0.16 even when it is not used.
+%pip uninstall -y -q torchao
 """),
         code(COMMON_CONFIG + rf"""
 ARM = "{arm}"                  # "hard": ds_label; "soft": distribution of the 3 annotators
