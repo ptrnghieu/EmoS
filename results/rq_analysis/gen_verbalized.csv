@@ -1,0 +1,2 @@
+clips,share of clips with the single most common output,distinct outputs,mean entropy,JSD to humans,"Spearman(entropy, human entropy)"
+1034,0.21179883945841393,161,1.6701863740401683,0.3041682932618296,0.12218052558825716
