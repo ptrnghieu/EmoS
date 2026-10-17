@@ -1,0 +1,40 @@
+{
+ "arm": "soft",
+ "sizes": {
+  "train": 2722,
+  "valid": 647,
+  "test": 1034
+ },
+ "epoch": 2,
+ "pos": 0,
+ "opt_step": 682,
+ "loss_sum": 0.0,
+ "loss_n": 0,
+ "oom": 0,
+ "history": [
+  {
+   "epoch": 0,
+   "train_loss": 1.084573953505537,
+   "val_loss": 1.034781498468871,
+   "val_jsd": 0.1656645330737298,
+   "val_acc": 0.6491499227202473,
+   "val_entropy": 1.0502839088439941,
+   "val_minutes": 14.3,
+   "session_hours": 3.01
+  },
+  {
+   "epoch": 1,
+   "train_loss": 0.930901923870208,
+   "val_loss": 1.0236189826442017,
+   "val_jsd": 0.15613374005185218,
+   "val_acc": 0.6584234930448223,
+   "val_entropy": 0.9364769458770752,
+   "val_minutes": 14.1,
+   "session_hours": 5.95
+  }
+ ],
+ "best_epoch": 1,
+ "best_val_loss": 1.0236189826442017,
+ "train_done": true,
+ "saved_at": 1792230712.4099956
+}
