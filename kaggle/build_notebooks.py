@@ -1,8 +1,9 @@
-"""Builds the Kaggle notebooks in this folder from shared cells, so both stay in sync.
+"""Builds the Kaggle notebooks in this folder from shared cells, so they stay in sync.
 
     python kaggle/build_notebooks.py
 
-Writes kaggle/benchmark_qwen25_omni.ipynb (speed test) and kaggle/run_qwen25_omni.ipynb (full run).
+Writes kaggle/benchmark_qwen25_omni.ipynb (speed test), kaggle/run_qwen25_omni.ipynb (full run) and
+kaggle/rq3_lora_{hard,soft}.ipynb (RQ3 fine-tuning, one notebook per arm).
 Edit the cells here, not in the .ipynb files.
 """
 
@@ -55,7 +56,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
+MODEL_ID = os.environ.get("MODEL_ID", "Qwen/Qwen2.5-Omni-7B")  # env override: local tests with a tiny model
 LOAD_IN_4BIT = False         # True: 4-bit NF4 weights (needs bitsandbytes), if fp16 does not fit
 MAX_MEMORY = {0: "12GiB", 1: "14GiB"}  # leave headroom on GPU 0 for activations
 FRAME_MAX_PIXELS = 448 * 252           # per-frame pixel cap passed to the Qwen video processor
@@ -547,6 +548,387 @@ if not gens.empty and "parsed" in gens:
 ]
 
 
+# ---- RQ3 fine-tuning notebooks (one per arm) ----------------------------------------------
+
+ARM_TEXT = {
+    "hard": "**hard labels**: cross-entropy with the dataset's single label `ds_label` (the usual way to fine-tune)",
+    "soft": ("**soft labels**: cross-entropy with the 3 annotators' vote distribution, e.g. 2× Joy + 1× Neutral → "
+             "Joy 2/3, Neutral 1/3 (same minimum as KL divergence to that distribution)"),
+}
+
+
+def rq3_cells(arm):
+    return [
+        md(rf"""
+# RQ3: LoRA fine-tuning of Qwen2.5-Omni-7B with {arm} labels (Kaggle, 2× T4)
+
+One of the two fine-tuned arms of RQ3. This notebook trains with {ARM_TEXT[arm]}.
+The other arm is the same notebook with `ARM = "{'soft' if arm == 'hard' else 'hard'}"`.
+
+**What it does**
+1. Adds small LoRA adapters (rank 16) to the attention layers of the language model; the audio and
+   vision encoders and all original weights stay frozen.
+2. Trains on the CH-SIMS v2 `train` split (2,722 clips, T+A+V input) for 2 epochs. The loss uses the
+   same 7 first-token logits that the zero-shot run scored, so the outputs are directly comparable.
+3. After each epoch, checks the `valid` split (647 clips) and keeps the epoch with the lowest
+   validation loss of this arm.
+4. With the best adapter, scores the `test` split under all 4 conditions (T+A+V, T, A, V) and the
+   `valid` split under T+A+V (for temperature scaling), in the same format as `omni_runs/scores.jsonl`.
+
+Estimate from the zero-shot timings: about 3–4 GPU-hours. The first progress lines print the
+measured speed and a projection.
+
+**Running it**
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: the preprocessed `chsims-mm` dataset.
+2. Optional quick check: set `LIMIT = 10` and run all interactively (a few minutes after the model download).
+   Do **not** attach that run's output later; the full run ignores it anyway because the clip counts differ.
+3. **Save Version → Save & Run All (Commit)**.
+4. If it stops at `TIME_BUDGET_H`, add this notebook's own output as an input (*Add input → Your Work*)
+   and commit again: training resumes from the last checkpoint, scoring skips finished clips.
+5. Results: `/kaggle/working/rq3_{arm}/` with `scores.jsonl`, `state.json` (training history) and the best adapter.
+"""),
+        code(r"""
+# peft added for LoRA; the rest as in the other notebooks.
+%pip install -q "transformers==5.20.1" "qwen-omni-utils==0.0.9" "peft==0.21.2" audioread librosa
+"""),
+        code(COMMON_CONFIG + rf"""
+ARM = "{arm}"                  # "hard": ds_label; "soft": distribution of the 3 annotators
+LORA_R, LORA_ALPHA, LORA_DROPOUT = 16, 32, 0.05
+# Attention projections of the language model only: the audio tower also has q/k/v_proj layers.
+LORA_TARGETS = r"^model\.layers\.\d+\.self_attn\.(q|k|v|o)_proj$"
+LR = 1e-4
+EPOCHS = 2
+GRAD_ACCUM = 8               # clips per optimizer step (one clip per forward pass)
+WARMUP = 0.03                # share of optimizer steps with a rising learning rate
+CKPT_EVERY = 200             # save a checkpoint every this many training clips (multiple of GRAD_ACCUM)
+TRAIN_MAX_MEMORY = {{0: "10GiB", 1: "14GiB"}}
+TIME_BUDGET_H = 11.0         # stop starting new work after this many hours (Kaggle stops at 12)
+LIMIT = None                 # e.g. 10 for a quick check: 10 clips per split
+TAG = f"{{MODEL_ID}}+lora-{{ARM}}"  # the `model` field of the saved records
+OUT_DIR = Path(os.environ.get("OUT_DIR", f"/kaggle/working/rq3_{{ARM}}"))
+T_START = time.time()
+assert ARM in ("hard", "soft") and CKPT_EVERY % GRAD_ACCUM == 0
+""" + COMMON_REPORT),
+        md(r"""
+## Load the model and add LoRA adapters
+
+Same thinker model as the zero-shot run, in fp16. The adapters are kept in fp32 and the loss is
+scaled (`GradScaler`) so small fp16 gradients do not round to zero. Gradient checkpointing trades
+compute for memory. The language-model head only computes the last position, the one the label is read from.
+"""),
+        code(r"""
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict
+from qwen_omni_utils import process_mm_info
+from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniThinkerForConditionalGeneration
+
+ON_GPU = torch.cuda.is_available()
+processor = Qwen2_5OmniProcessor.from_pretrained(MODEL_ID)
+kwargs = dict(dtype=torch.float16 if ON_GPU else torch.float32, attn_implementation="sdpa")
+if ON_GPU:
+    kwargs.update(device_map="auto", max_memory=TRAIN_MAX_MEMORY)
+t0 = time.time()
+base = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(MODEL_ID, **kwargs)
+print(f"loaded in {time.time() - t0:.0f} s")
+base.config.use_cache = False
+base.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+base.lm_head.register_forward_pre_hook(lambda module, args: (args[0][:, -1:],) + args[1:])
+
+torch.manual_seed(SEED)
+model = get_peft_model(base, LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
+                                        target_modules=LORA_TARGETS, bias="none"))
+trainable = [p for p in model.parameters() if p.requires_grad]
+n_lora = sum(name.endswith("lora_A.default") for name, _ in model.named_modules())
+print(f"LoRA on {n_lora} layers | trainable params: {sum(p.numel() for p in trainable) / 1e6:.1f} M |",
+      "adapter dtype:", trainable[0].dtype)
+for i in range(torch.cuda.device_count()):
+    print(f"cuda:{i} allocated after load: {torch.cuda.memory_allocated(i) / 2**30:.1f} GiB")
+"""),
+        md("## Prompts (same as the zero-shot run)"),
+        PROMPTS,
+        md(r"""
+## Clips and targets
+
+`target` is what the loss compares against: the 3 annotators' votes as a distribution over the 7
+labels (soft arm), or a one-hot vector on `ds_label` (hard arm). `human` is always the vote
+distribution, used for the validation metrics.
+"""),
+        code(r"""
+manifest = pd.read_csv(DATA_DIR / "manifest.csv", dtype={"video_id": str, "clip_id": str})
+clips = manifest[manifest["status"] == "ok"].reset_index(drop=True)
+splits = {m: clips[clips["mode"] == m].reset_index(drop=True) for m in ("train", "valid", "test")}
+if LIMIT:
+    splits = {m: df.head(LIMIT) for m, df in splits.items()}
+
+
+def targets(df):
+    votes = df[["ann1", "ann2", "ann3"]].to_numpy()
+    human = np.stack([(votes == l).sum(axis=1) for l in LABELS], axis=1) / votes.shape[1]
+    hard = np.eye(len(LABELS))[[LABELS.index(l) for l in df["ds_label"]]]
+    return human, (human if ARM == "soft" else hard)
+
+
+for m, df in splits.items():
+    human, target = targets(df)
+    df["human"], df["target"] = list(human), list(target)
+    print(f"{m:5s} {len(df):5d} clips | majority labels: {df['ds_label'].value_counts().to_dict()}")
+train_df, valid_df, test_df = splits["train"], splits["valid"], splits["test"]
+"""),
+        md(r"""
+## Loss and validation
+
+`label_logits` runs the T+A+V prompt and returns the logits of the 7 labels' first tokens. The loss is
+the cross-entropy between `target` and the softmax over those 7 logits. Validation also reports the
+Jensen–Shannon divergence to the annotators' distribution (lower is closer), accuracy against
+`ds_label`, and the model's mean entropy.
+"""),
+        code(r"""
+def label_logits(row, condition="TAV"):
+    inputs = prepare(build_messages(row, condition, ask="label"))
+    out = model(**inputs, use_cache=False)
+    return out.logits[0, -1, label_first_ids].float(), inputs
+
+
+def loss_fn(logits, row):
+    target = torch.tensor(row["target"], dtype=torch.float32, device=logits.device)
+    return -(target * torch.log_softmax(logits, dim=-1)).sum()
+
+
+def jsd(p, q):
+    m = (p + q) / 2
+    kl = lambda a, b: np.where(a > 0, a * np.log(np.clip(a, 1e-12, None) / np.clip(b, 1e-12, None)), 0).sum(axis=-1)
+    return (kl(p, m) + kl(q, m)) / 2
+
+
+@torch.inference_mode()
+def validate(df):
+    model.eval()
+    probs, losses = [], []
+    for _, row in df.iterrows():
+        logits, _ = label_logits(row)
+        losses.append(float(loss_fn(logits, row)))
+        probs.append(torch.softmax(logits, dim=-1).cpu().numpy())
+    model.train()
+    probs, human = np.array(probs), np.stack(df["human"])
+    return {"val_loss": float(np.mean(losses)), "val_jsd": float(jsd(probs, human).mean()),
+            "val_acc": float((np.array(LABELS)[probs.argmax(1)] == df["ds_label"].to_numpy()).mean()),
+            "val_entropy": float(-(probs * np.log(np.clip(probs, 1e-12, None))).sum(1).mean())}
+"""),
+        md(r"""
+## Checkpoints and resume
+
+Everything needed to continue sits in `OUT_DIR`: the latest adapter and optimizer state (`last/`),
+the best adapter so far (`best/`), and `state.json` (position in the data, training history).
+On start, the most recent `rq3_<arm>` folder found under `/kaggle/input` is copied in, as long as it
+was made with the same clip counts (so a `LIMIT` test run is never resumed by the full run).
+"""),
+        code(r"""
+optimizer = torch.optim.AdamW(trainable, lr=LR, weight_decay=0.0)
+steps_per_epoch = -(-len(train_df) // GRAD_ACCUM)
+total_steps = EPOCHS * steps_per_epoch
+warmup_steps = max(1, int(WARMUP * total_steps))
+scheduler = torch.optim.lr_scheduler.LambdaLR(
+    optimizer, lambda s: min((s + 1) / warmup_steps, max(0.0, (total_steps - s) / max(1, total_steps - warmup_steps))))
+scaler = torch.amp.GradScaler("cuda", enabled=ON_GPU)
+SIZES = {m: len(df) for m, df in splits.items()}
+state = {"arm": ARM, "sizes": SIZES, "epoch": 0, "pos": 0, "opt_step": 0, "loss_sum": 0.0, "loss_n": 0,
+         "oom": 0, "history": [], "best_epoch": None, "best_val_loss": None, "train_done": False}
+
+
+def read_state(folder):
+    path = Path(folder) / "state.json"
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def save_checkpoint():
+    tmp = OUT_DIR / "last.tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir()
+    torch.save(get_peft_model_state_dict(model), tmp / "adapter.pt")
+    torch.save({"optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                "scaler": scaler.state_dict()}, tmp / "optim.pt")
+    shutil.rmtree(OUT_DIR / "last", ignore_errors=True)
+    tmp.rename(OUT_DIR / "last")
+    state["saved_at"] = time.time()
+    (OUT_DIR / "state.json").write_text(json.dumps(state, indent=1))
+
+
+def out_of_time():
+    return (time.time() - T_START) / 3600 > TIME_BUDGET_H
+
+
+if read_state(OUT_DIR) is None:
+    found = [(s, Path(p).parent) for p in glob.glob(f"/kaggle/input/**/rq3_{ARM}/state.json", recursive=True)
+             if (s := read_state(Path(p).parent))]
+    usable = [(s, d) for s, d in found if s.get("sizes") == SIZES]
+    if len(usable) < len(found):
+        print(f"ignoring {len(found) - len(usable)} earlier run(s) made with different clip counts")
+    if usable:
+        src = max(usable, key=lambda x: x[0].get("saved_at", 0))[1]
+        shutil.copytree(src, OUT_DIR, dirs_exist_ok=True)
+        print("copied earlier run from", src)
+
+saved = read_state(OUT_DIR)
+if saved and saved.get("sizes") == SIZES:
+    state.update(saved)
+    if (OUT_DIR / "last" / "adapter.pt").exists():
+        set_peft_model_state_dict(model, torch.load(OUT_DIR / "last" / "adapter.pt", map_location="cpu"))
+        opt = torch.load(OUT_DIR / "last" / "optim.pt", map_location="cpu")
+        optimizer.load_state_dict(opt["optimizer"])
+        scheduler.load_state_dict(opt["scheduler"])
+        scaler.load_state_dict(opt["scaler"])
+    print(f"resuming: epoch {state['epoch']}, clip {state['pos']}/{len(train_df)}, optimizer step {state['opt_step']},",
+          "training done" if state["train_done"] else "")
+else:
+    print(f"fresh start: {total_steps} optimizer steps ({EPOCHS} epochs x {steps_per_epoch})")
+"""),
+        md(r"""
+## Train
+
+One clip per forward pass; gradients are summed over `GRAD_ACCUM` clips before each optimizer step.
+Each epoch sees the training clips in a fixed shuffled order (seeded by the epoch), so a resumed run
+continues exactly where the last one stopped. A clip that runs out of GPU memory is skipped and counted.
+"""),
+        code(r"""
+def train():
+    model.train()
+    t_run, n_run = time.time(), 0
+    while state["epoch"] < EPOCHS:
+        epoch = state["epoch"]
+        order = np.random.default_rng(SEED + epoch).permutation(len(train_df))
+        while state["pos"] < len(order):
+            if out_of_time():
+                save_checkpoint()
+                return False
+            batch = order[state["pos"]:state["pos"] + GRAD_ACCUM]
+            for i in batch:
+                row = train_df.iloc[i]
+                try:
+                    logits, _ = label_logits(row)
+                    loss = loss_fn(logits, row)
+                    scaler.scale(loss / len(batch)).backward()
+                    state["loss_sum"] += loss.item()
+                    state["loss_n"] += 1
+                except torch.cuda.OutOfMemoryError:
+                    torch.cuda.empty_cache()
+                    state["oom"] += 1
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            scheduler.step()
+            state["pos"] += len(batch)
+            state["opt_step"] += 1
+            n_run += len(batch)
+            if state["pos"] % CKPT_EVERY == 0 or state["pos"] == len(order):
+                save_checkpoint()
+            if n_run in (48, 200) or state["opt_step"] % 50 == 0:
+                sec = (time.time() - t_run) / n_run
+                left = (EPOCHS * len(train_df) - epoch * len(train_df) - state["pos"]) * sec / 3600
+                peak = max([torch.cuda.max_memory_allocated(d) / 2**30 for d in range(torch.cuda.device_count())] or [0])
+                print(f"epoch {epoch} clip {state['pos']}/{len(order)} | loss {state['loss_sum'] / max(1, state['loss_n']):.3f}"
+                      f" | {sec:.2f} s/clip, about {left:.1f} h of training left | peak {peak:.1f} GiB | OOM {state['oom']}")
+        if not any(h["epoch"] == epoch for h in state["history"]):
+            t0 = time.time()
+            metrics = validate(valid_df)
+            entry = {"epoch": epoch, "train_loss": state["loss_sum"] / max(1, state["loss_n"]), **metrics,
+                     "val_minutes": round((time.time() - t0) / 60, 1), "session_hours": round((time.time() - T_START) / 3600, 2)}
+            state["history"].append(entry)
+            print(entry)
+            if state["best_val_loss"] is None or metrics["val_loss"] < state["best_val_loss"]:
+                state["best_epoch"], state["best_val_loss"] = epoch, metrics["val_loss"]
+                (OUT_DIR / "best").mkdir(exist_ok=True)
+                torch.save(get_peft_model_state_dict(model), OUT_DIR / "best" / "adapter.pt")
+        state.update(epoch=epoch + 1, pos=0, loss_sum=0.0, loss_n=0)
+        save_checkpoint()
+    state["train_done"] = True
+    save_checkpoint()
+    return True
+
+
+finished = state["train_done"] or train()
+print("training finished, best epoch:", state["best_epoch"]) if finished else print(
+    "stopped at the time budget: add this notebook's output as an input and commit again")
+"""),
+        md(r"""
+## Score the test split with the best adapter
+
+Same record format as the zero-shot `omni_runs/scores.jsonl`, with `model` set to `TAG`, so the
+analysis script can compare the arms clip by clip. Valid clips are scored under T+A+V for
+temperature scaling.
+"""),
+        code(r"""
+SCORES = OUT_DIR / "scores.jsonl"
+
+
+def key(rec):
+    return (rec["model"], rec["uid"], rec["condition"], rec["task"])
+
+
+done, n_new = set(), 0
+if finished:
+    model.eval()
+    set_peft_model_state_dict(model, torch.load(OUT_DIR / "best" / "adapter.pt", map_location="cpu"))
+    records = {}
+    if SCORES.exists():
+        for line in open(SCORES, encoding="utf-8"):
+            if line.strip() and "error" not in (rec := json.loads(line)):
+                records[key(rec)] = rec
+    with open(SCORES, "w", encoding="utf-8") as f:
+        for rec in records.values():
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    done = set(records)
+    jobs = [(row, c, "test") for _, row in test_df.iterrows() for c in CONDITIONS]
+    jobs += [(row, "TAV", "valid") for _, row in valid_df.iterrows()]
+    todo = [j for j in jobs if (TAG, j[0]["uid"], j[1], "score") not in done]
+    print(f"{len(jobs)} items, {len(jobs) - len(todo)} already done, {len(todo)} to run")
+    for row, condition, split in todo:
+        if out_of_time():
+            print("stopped at the time budget: add this notebook's output as an input and commit again")
+            break
+        rec = {"model": TAG, "uid": row["uid"], "condition": condition, "task": "score", "split": split}
+        try:
+            with torch.inference_mode():
+                t0 = time.perf_counter()
+                inputs = prepare(build_messages(row, condition, ask="label"))
+                t1 = time.perf_counter()
+                logits = model(**inputs, use_cache=False).logits[0, -1].float()
+            rec.update(n_tokens=int(inputs["input_ids"].shape[1]), prep_s=round(t1 - t0, 3),
+                       gpu_s=round(time.perf_counter() - t1, 3), finite=bool(torch.isfinite(logits).all()),
+                       lse=float(torch.logsumexp(logits, dim=-1)))
+            rec.update({f"logit_{l}": float(v) for l, v in zip(LABELS, logits[label_first_ids].tolist())})
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            rec["error"] = "oom"
+        with open(SCORES, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        n_new += 1
+    print(f"scored {n_new} items this run")
+"""),
+        md("## Summary"),
+        code(r"""
+print(pd.DataFrame(state["history"]).round(4).to_string(index=False) if state["history"] else "no finished epoch yet")
+if SCORES.exists():
+    s = pd.DataFrame([json.loads(l) for l in open(SCORES, encoding="utf-8") if l.strip()])
+    s = s[s.get("error", pd.Series(index=s.index, dtype=object)).isna()].merge(
+        clips[["uid", "ds_label", "conflict"]], on="uid")
+    p = np.exp(s[[f"logit_{l}" for l in LABELS]].to_numpy() - s[["lse"]].to_numpy())
+    s["label_mass"] = p.sum(1)
+    p = p / p.sum(1, keepdims=True)
+    s["pred"] = np.array(LABELS)[p.argmax(1)]
+    s["entropy"] = -(p * np.log(np.clip(p, 1e-12, None))).sum(1)
+    s["correct"] = s["pred"] == s["ds_label"]
+    print(s.groupby(["split", "condition"]).agg(n=("uid", "size"), accuracy=("correct", "mean"),
+                                                 label_mass=("label_mass", "mean")).round(3).to_string())
+    tav = s[(s["split"] == "test") & (s["condition"] == "TAV")]
+    print("test T+A+V, mean entropy by conflict:", tav.groupby("conflict")["entropy"].mean().round(3).to_dict(),
+          "| share predicted Neutral:", tav.groupby("conflict")["pred"].apply(lambda x: (x == "Neutral").mean()).round(3).to_dict())
+"""),
+    ]
+
+
 if __name__ == "__main__":
     write(HERE / "benchmark_qwen25_omni.ipynb", BENCHMARK)
     write(HERE / "run_qwen25_omni.ipynb", RUN)
+    for arm in ("hard", "soft"):
+        write(HERE / f"rq3_lora_{arm}.ipynb", rq3_cells(arm))

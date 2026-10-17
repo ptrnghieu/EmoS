@@ -10,7 +10,9 @@ CH-SIMS v2(s) clips re-annotated in EmoS.
 | `preprocess_chsims.py` | Extracts frames and 16 kHz audio from the raw clips and writes `manifest.csv` |
 | `../kaggle/benchmark_qwen25_omni.ipynb` | Speed and memory test of Qwen2.5-Omni-7B on Kaggle (2× T4) |
 | `../kaggle/run_qwen25_omni.ipynb` | Full run: label logits for all clips × 4 conditions, plus verbalized and per-modality generation on the test split; resumable |
-| `../kaggle/build_notebooks.py` | Builds both notebooks from shared cells: edit cells there, then run it |
+| `../kaggle/rq3_lora_hard.ipynb`, `../kaggle/rq3_lora_soft.ipynb` | RQ3: LoRA fine-tuning on the train split with hard labels (`ds_label`) or soft labels (the 3 annotators' votes), then label logits on the test split; resumable |
+| `rq_analysis.py` | RQ1/RQ2 tables from the full run: `python analysis/rq_analysis.py --runs results/omni_runs --out results/rq_analysis` |
+| `../kaggle/build_notebooks.py` | Builds all Kaggle notebooks from shared cells: edit cells there, then run it |
 
 Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH` for preprocessing.
 
@@ -32,6 +34,11 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
 6. **Full run**: same settings with `kaggle/run_qwen25_omni.ipynb`, using *Save Version → Save & Run All*.
    It stops after `TIME_BUDGET_H` hours; to continue, add the notebook's own output as an input and
    commit again. Results: `omni_runs/scores.jsonl` and `omni_runs/generations.jsonl`.
+7. **RQ3 fine-tuning**: `kaggle/rq3_lora_hard.ipynb` and `kaggle/rq3_lora_soft.ipynb`, each as its own Kaggle
+   notebook with the same settings. Each trains for 2 epochs, keeps the epoch with the lowest validation loss,
+   then scores the test split (4 conditions) and the valid split (T+A+V). Resume works as in step 6.
+   Results: `rq3_<arm>/scores.jsonl` (same format as `omni_runs/scores.jsonl`, `model` = `<model>+lora-<arm>`)
+   and `rq3_<arm>/state.json` (training history).
 
 ## Note on clip ids
 
