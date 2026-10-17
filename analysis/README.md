@@ -14,6 +14,7 @@ CH-SIMS v2(s) clips re-annotated in EmoS.
 | `rq_analysis.py` | RQ1/RQ2 tables from the full run: `python analysis/rq_analysis.py --runs results/omni_runs --out results/rq_analysis` |
 | `rq1_models.py` | RQ1 models: ordinal regression with a random intercept per video (binary conflict and conflict type), pairwise conflict-type tests with Holm correction, mixed models for the continuous disagreement measures (Basic-7 entropy, GoEmotions entropy, 1 − ds_confidence), robustness checks: `python analysis/rq1_models.py --out results/rq1_models` |
 | `rq3_analysis.py` | RQ3 comparison on the test split: zero-shot, LoRA hard, LoRA soft, each with and without temperature scaling: `python analysis/rq3_analysis.py --out results/rq3_analysis` |
+| `../kaggle/run_minicpm_o.ipynb` | RQ2 with a second model: MiniCPM-o 2.6 label scoring, all clips × 4 conditions, same record format; resumable |
 | `../kaggle/build_notebooks.py` | Builds all Kaggle notebooks from shared cells: edit cells there, then run it |
 
 Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH` for preprocessing; `scipy` and `statsmodels` for `rq1_models.py`.
@@ -41,6 +42,8 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
    then scores the test split (4 conditions) and the valid split (T+A+V). Resume works as in step 6.
    Results: `rq3_<arm>/scores.jsonl` (same format as `omni_runs/scores.jsonl`, `model` = `<model>+lora-<arm>`)
    and `rq3_<arm>/state.json` (training history). Copy both folders to `results/rq3/`, then run `rq3_analysis.py`.
+8. **Second model**: `kaggle/run_minicpm_o.ipynb` with the same settings (pins `transformers==4.48.3`, see the notebook).
+   Results: `minicpm_runs/scores.jsonl`.
 
 ## Note on clip ids
 

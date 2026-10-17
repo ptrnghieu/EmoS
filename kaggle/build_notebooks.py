@@ -2,8 +2,9 @@
 
     python kaggle/build_notebooks.py
 
-Writes kaggle/benchmark_qwen25_omni.ipynb (speed test), kaggle/run_qwen25_omni.ipynb (full run) and
-kaggle/rq3_lora_{hard,soft}.ipynb (RQ3 fine-tuning, one notebook per arm).
+Writes kaggle/benchmark_qwen25_omni.ipynb (speed test), kaggle/run_qwen25_omni.ipynb (full run),
+kaggle/rq3_lora_{hard,soft}.ipynb (RQ3 fine-tuning, one notebook per arm) and kaggle/run_minicpm_o.ipynb
+(RQ2 label scoring with a second model).
 Edit the cells here, not in the .ipynb files.
 """
 
@@ -575,8 +576,8 @@ The other arm is the same notebook with `ARM = "{'soft' if arm == 'hard' else 'h
 4. With the best adapter, scores the `test` split under all 4 conditions (T+A+V, T, A, V) and the
    `valid` split under T+A+V (for temperature scaling), in the same format as `omni_runs/scores.jsonl`.
 
-Estimate from the zero-shot timings: about 3–4 GPU-hours. The first progress lines print the
-measured speed and a projection.
+Measured on Kaggle: about 6 GPU-hours to the end of training and validation, about 7 with scoring.
+The first progress lines print the measured speed and a projection.
 
 **Running it**
 1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: the preprocessed `chsims-mm` dataset.
@@ -929,8 +930,284 @@ if SCORES.exists():
     ]
 
 
+# ---- second model: MiniCPM-o 2.6, label scoring only ------------------------------------
+
+MINICPM = [
+    md(r"""
+# RQ2, second model: MiniCPM-o 2.6 on CH-SIMS v2 (Kaggle, 2× T4)
+
+Repeats the label scoring of the Qwen2.5-Omni-7B run with a second omni model from another family:
+all 4,403 clips × 4 conditions (T+A+V, T, A, V), the same prompt and the same record format
+(logits of the 7 labels' first tokens + log-sum-exp), written to `/kaggle/working/minicpm_runs/scores.jsonl`.
+Only label scoring is run; the generation tasks of the Qwen run are left out.
+
+How the inputs follow the model's own usage (its `chat` method, which this notebook reproduces up to
+the first answer token):
+- **T+A+V**: MiniCPM-o's omni format, one unit per second of the clip = one frame + that second of audio,
+  then the transcript and the question.
+- **V**: the same one-frame-per-second images, no audio. **A**: the whole audio. **T**: the transcript.
+- System prompt: the model's own omni prompt. Images use one slice each (64 tokens per frame).
+- When audio is present the model's chat template adds speech tokens before the answer
+  (`<|spk_bos|><|spk|><|spk_eos|><|tts_bos|>`); the label is read from the next text token, as `chat` would generate it.
+
+**Versions**: the model card asks for `transformers==4.44.2`, whose `tokenizers` has no build for the
+Python 3.13 that Kaggle runs. This notebook pins `transformers==4.48.3`, checked locally with the model's
+code on a small random-weight copy: the scored logits match those of the model's own `generate`.
+The speech-output part (TTS) is not loaded. T4 has no bf16, so the model runs in fp16, split over both GPUs.
+
+**Running it**
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: the preprocessed `chsims-mm` dataset.
+2. First set `LIMIT = 10` and run all interactively: check the load report, the `label mass` and the
+   timing lines, and send them over before the full run.
+3. Full run: `LIMIT = None`, **Save Version → Save & Run All (Commit)**. It stops after `TIME_BUDGET_H`;
+   to continue, add this notebook's output as an input and commit again.
+"""),
+    code(r"""
+# transformers 4.48.3: newest checked with MiniCPM-o's remote code; 4.44.2 (model card) cannot install on Python 3.13.
+%pip install -q "transformers==4.48.3" accelerate librosa soundfile
+"""),
+    code(r"""
+import glob
+import json
+import math
+import os
+import shutil
+import time
+from copy import deepcopy
+from pathlib import Path
+
+import librosa
+import numpy as np
+import pandas as pd
+import torch
+from PIL import Image
+
+MODEL_ID = os.environ.get("MODEL_ID", "openbmb/MiniCPM-o-2_6")  # env override: local tests with a tiny model
+SPLIT_LAYER = 13             # LLM layers 0..12 on GPU 0 (with the vision and audio encoders), the rest on GPU 1
+TIME_BUDGET_H = 11.0         # stop starting new items after this many hours
+LIMIT = None                 # e.g. 10 for a quick check: 10 test clips + 10 other clips
+SR = 16000
+OUT_DIR = Path(os.environ.get("OUT_DIR", "/kaggle/working/minicpm_runs"))
+T_START = time.time()
+
+DATA_DIR = os.environ.get("CHSIMS_MM_DIR")
+if DATA_DIR is None:
+    hits = glob.glob("/kaggle/input/**/manifest.csv", recursive=True)
+    assert hits, "No manifest.csv under /kaggle/input: attach the preprocessed dataset."
+    DATA_DIR = os.path.dirname(hits[0])
+DATA_DIR = Path(DATA_DIR)
+DRY_RUN = False
+""" + COMMON_REPORT),
+    md("## Clips"),
+    code(r"""
+manifest = pd.read_csv(DATA_DIR / "manifest.csv", dtype={"video_id": str, "clip_id": str})
+clips = manifest[manifest["status"] == "ok"].reset_index(drop=True)
+if LIMIT:
+    clips = pd.concat([clips[clips["mode"] == "test"].head(LIMIT), clips[clips["mode"] != "test"].head(LIMIT)])
+print(len(clips), "clips to score")
+"""),
+    md(r"""
+## Load the model
+
+Without the speech-output part. On GPU the layers are placed by hand: the vision and audio encoders
+must sit with the token embeddings, because the model's code writes their outputs into the embedding
+tensor directly.
+"""),
+    code(r"""
+from transformers import AutoConfig, AutoModel, AutoTokenizer
+
+ON_GPU = torch.cuda.is_available()
+kwargs = dict(trust_remote_code=True, attn_implementation="sdpa", init_vision=True, init_audio=True, init_tts=False,
+              torch_dtype=torch.float16 if ON_GPU else torch.float32)
+if ON_GPU:
+    n_layers = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True).num_hidden_layers
+    device_map = {m: 0 for m in ("vpm", "resampler", "apm", "audio_avg_pooler", "audio_projection_layer",
+                                 "llm.model.embed_tokens")}
+    device_map.update({f"llm.model.layers.{i}": 0 if i < SPLIT_LAYER else 1 for i in range(n_layers)})
+    device_map.update({"llm.model.norm": 1, "llm.model.rotary_emb": 1, "llm.lm_head": 1})
+    kwargs["device_map"] = device_map
+t0 = time.time()
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+model = AutoModel.from_pretrained(MODEL_ID, **kwargs).eval()
+processor = model.processor
+print(f"loaded in {time.time() - t0:.0f} s | first parameter on {model.device}, dtype {model.dtype}")
+for i in range(torch.cuda.device_count()):
+    print(f"cuda:{i} allocated after load: {torch.cuda.memory_allocated(i) / 2**30:.1f} GiB")
+"""),
+    md(r"""
+## Prompts and label scoring
+
+Same wording as the Qwen run. `prepare` follows `MiniCPMO.chat` up to the processor call;
+`label_logits` runs the embedding steps of `MiniCPMO.generate` and one forward pass of the language model.
+"""),
+    code(r"""
+LABELS = ["Anger", "Disgust", "Fear", "Joy", "Neutral", "Sadness", "Surprise"]
+DESCRIBE = {
+    "TAV": "the video frames, the audio track and the transcript",
+    "T": "only the transcript",
+    "A": "only the audio track",
+    "V": "only the video frames, without sound",
+}
+CONDITIONS = list(DESCRIBE)
+ASK = f"Which emotion does the speaker express? Choose exactly one of: {', '.join(LABELS)}.\nAnswer with the label only."
+label_first_ids = [tokenizer.encode(l, add_special_tokens=False)[0] for l in LABELS]
+assert len(set(label_first_ids)) == len(LABELS), "two labels share a first token"
+
+
+def per_second_frames(row, n_units):
+    # frames were extracted at row.sample_fps; take the one nearest the middle of each second
+    frames = sorted(glob.glob(str(DATA_DIR / row["frames_dir"] / "*.jpg")))
+    fps = float(row["sample_fps"])
+    return [Image.open(frames[min(len(frames) - 1, int(round((i + 0.5) * fps)))]).convert("RGB") for i in range(n_units)]
+
+
+def build_messages(row, condition):
+    audio = librosa.load(str(DATA_DIR / row["audio_path"]), sr=SR, mono=True)[0] if "A" in condition else None
+    n_units = max(1, math.ceil(float(row["duration"])))
+    text = f"You are given {DESCRIBE[condition]} of a speaker in a scene from a Chinese film or TV series.\n"
+    if "T" in condition:
+        text += f"Transcript: {row['text']}\n"
+    text += ASK
+    if condition == "TAV":
+        content = []
+        for i, img in enumerate(per_second_frames(row, n_units)):
+            content += ["<unit>", img, audio[i * SR:(i + 1) * SR]]
+        content.append(text)
+    elif condition == "V":
+        content = per_second_frames(row, n_units) + [text]
+    elif condition == "A":
+        content = [audio, text]
+    else:
+        content = [text]
+    return [model.get_sys_prompt(mode="omni", language="en"), {"role": "user", "content": content}]
+
+
+def prepare(messages, omni):
+    images, audios, audio_parts, use_tts = [], [], [], False
+    messages = deepcopy(messages)
+    for i, msg in enumerate(messages):
+        parts = []
+        for c in msg["content"]:
+            if isinstance(c, Image.Image):
+                images.append(c)
+                parts.append("(<image>./</image>)")
+            elif isinstance(c, np.ndarray):  # audio
+                audios.append(c)
+                audio_parts.append(i)
+                parts.append("(<audio>./</audio>)")
+                use_tts = True
+            else:
+                parts.append(c)
+        msg["content"] = ("" if omni else "\n").join(parts)
+    prompt = processor.tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True,
+        chat_template=model.default_tts_chat_template if use_tts else None)
+    inputs = processor([prompt], [images], [audios], [audio_parts], max_slice_nums=1, use_image_id=False,
+                       chunk_input=True, return_tensors="pt", max_length=32768).to(model.device)
+    inputs.pop("image_sizes")  # the model casts pixel values and audio features to its own dtype
+    return inputs
+
+
+@torch.inference_mode()
+def label_logits(inputs):
+    emb, _ = model.get_vllm_embedding(inputs)
+    emb = model.get_omni_embedding(inputs, input_embeddings=emb, chunk_length=model.config.audio_chunk_length)
+    return model.llm(inputs_embeds=emb, attention_mask=inputs["attention_mask"], use_cache=False).logits[0, -1].float()
+"""),
+    md(r"""
+## Resume
+
+Records are keyed by (model, uid, condition, task). Earlier records found under `/kaggle/input` or in
+`OUT_DIR` are copied into this run's output and skipped below.
+"""),
+    code(r"""
+SCORES = OUT_DIR / "scores.jsonl"
+
+
+def key(rec):
+    return (rec["model"], rec["uid"], rec["condition"], rec["task"])
+
+
+sources = sorted(set(glob.glob("/kaggle/input/**/minicpm_runs/scores.jsonl", recursive=True)) | ({str(SCORES)} if SCORES.exists() else set()))
+records = {}
+for src in sources:
+    for line in open(src, encoding="utf-8"):
+        if line.strip() and "error" not in (rec := json.loads(line)):
+            records[key(rec)] = rec
+with open(SCORES, "w", encoding="utf-8") as f:
+    for rec in records.values():
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+done = set(records)
+print(f"{len(records)} finished records from {len(sources)} file(s)")
+
+
+def out_of_time():
+    return (time.time() - T_START) / 3600 > TIME_BUDGET_H
+"""),
+    md(r"""
+## Run
+
+All clips under T+A+V first, then T, A and V, so a run cut short still has the main condition complete.
+A clip that fails (for example out of memory) is saved with an `error` field and retried on the next run.
+"""),
+    code(r"""
+def run_score(row, condition):
+    t0 = time.perf_counter()
+    inputs = prepare(build_messages(row, condition), omni=condition == "TAV")
+    t1 = time.perf_counter()
+    logits = label_logits(inputs)
+    rec = {"model": MODEL_ID, "uid": row["uid"], "condition": condition, "task": "score",
+           "n_tokens": int(inputs["input_ids"].shape[1]), "prep_s": round(t1 - t0, 3),
+           "gpu_s": round(time.perf_counter() - t1, 3), "finite": bool(torch.isfinite(logits).all()),
+           "lse": float(torch.logsumexp(logits, dim=-1))}
+    rec.update({f"logit_{l}": float(v) for l, v in zip(LABELS, logits[label_first_ids].tolist())})
+    return rec
+
+
+jobs = [(row, c) for c in CONDITIONS for _, row in clips.iterrows()]
+todo = [j for j in jobs if (MODEL_ID, j[0]["uid"], j[1], "score") not in done]
+print(f"{len(jobs)} items, {len(jobs) - len(todo)} already done, {len(todo)} to run")
+
+n_done, stopped_early, t_run = 0, False, time.time()
+for row, condition in todo:
+    if out_of_time():
+        stopped_early = True
+        break
+    try:
+        rec = run_score(row, condition)
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        rec = {"model": MODEL_ID, "uid": row["uid"], "condition": condition, "task": "score", "error": "oom"}
+    with open(SCORES, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    n_done += 1
+    if n_done in (20, 100) or n_done % 500 == 0:
+        sec = (time.time() - t_run) / n_done
+        peak = max([torch.cuda.max_memory_allocated(d) / 2**30 for d in range(torch.cuda.device_count())] or [0])
+        print(f"{n_done}/{len(todo)} | {sec:.2f} s/item, about {(len(todo) - n_done) * sec / 3600:.1f} h left | "
+              f"peak {peak:.1f} GiB | last: {condition}")
+
+print(f"finished {n_done} items this run", "(stopped at the time budget: commit again to continue)" if stopped_early else "")
+"""),
+    md("## Progress and quick checks"),
+    code(r"""
+s = pd.DataFrame([json.loads(l) for l in open(SCORES, encoding="utf-8") if l.strip()])
+ok = s[s.get("error", pd.Series(index=s.index, dtype=object)).isna()] if len(s) else s
+print(f"{len(ok)} / {len(clips) * len(CONDITIONS)} items done |", "OOM:", int((s.get("error") == "oom").sum()) if "error" in s else 0)
+if len(ok):
+    p = np.exp(ok[[f"logit_{l}" for l in LABELS]].to_numpy() - ok[["lse"]].to_numpy())
+    ok = ok.assign(label_mass=p.sum(1), pred=np.array(LABELS)[p.argmax(1)]).merge(clips[["uid", "ds_label"]], on="uid")
+    print(ok.groupby("condition").agg(n=("uid", "size"), label_mass=("label_mass", "mean"),
+                                      accuracy=("pred", lambda x: (x == ok.loc[x.index, "ds_label"]).mean()),
+                                      nonfinite=("finite", lambda x: int((~x.astype(bool)).sum())),
+                                      gpu_s=("gpu_s", "mean"), prep_s=("prep_s", "mean")).round(3).to_string())
+"""),
+]
+
+
 if __name__ == "__main__":
     write(HERE / "benchmark_qwen25_omni.ipynb", BENCHMARK)
     write(HERE / "run_qwen25_omni.ipynb", RUN)
+    write(HERE / "run_minicpm_o.ipynb", MINICPM)
     for arm in ("hard", "soft"):
         write(HERE / f"rq3_lora_{arm}.ipynb", rq3_cells(arm))
