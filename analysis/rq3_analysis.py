@@ -99,6 +99,7 @@ def main() -> None:
         return {
             "JSD to humans": lambda i: jsd(P[i], H[i]).mean(),
             "accuracy": lambda i: (pred[i] == gold[i]).mean(),
+            "accuracy, all 3 agree": lambda i: (pred[i] == gold[i])[~disagree[i]].mean(),
             "entropy change on conflict": lambda i: ent[i][conflict[i]].mean() - ent[i][~conflict[i]].mean(),
             "Spearman(entropy, human entropy)": lambda i: spearman(ent[i], human_ent[i]),
             "AUROC: entropy flags disagreement": lambda i: auroc(ent[i], disagree[i]),
