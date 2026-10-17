@@ -587,6 +587,11 @@ The first progress lines print the measured speed and a projection.
 4. If it stops at `TIME_BUDGET_H`, add this notebook's own output as an input (*Add input → Your Work*)
    and commit again: training resumes from the last checkpoint, scoring skips finished clips.
 5. Results: `/kaggle/working/rq3_{arm}/` with `scores.jsonl`, `state.json` (training history) and the best adapter.
+
+**Extra seeds.** `SEED` sets the LoRA initialisation, the order of the training clips and dropout.
+The first run used `SEED = 0`. For the extra runs set `SEED = 1`, then `SEED = 2`, each in its own committed
+version: results go to `rq3_{arm}_seed1/` and `rq3_{arm}_seed2/`, and their records are tagged
+`...+lora-{arm}-seed1` / `-seed2`. To resume one of them, attach the output of the version that ran that seed.
 """),
         code(r"""
 # peft added for LoRA; the rest as in the other notebooks.
@@ -607,8 +612,11 @@ CKPT_EVERY = 200             # save a checkpoint every this many training clips 
 TRAIN_MAX_MEMORY = {{0: "10GiB", 1: "14GiB"}}
 TIME_BUDGET_H = 11.0         # stop starting new work after this many hours (Kaggle stops at 12)
 LIMIT = None                 # e.g. 10 for a quick check: 10 clips per split
-TAG = f"{{MODEL_ID}}+lora-{{ARM}}"  # the `model` field of the saved records
-OUT_DIR = Path(os.environ.get("OUT_DIR", f"/kaggle/working/rq3_{{ARM}}"))
+SEED = int(os.environ.get("SEED", 0))  # 0 = the first run; 1 and 2 = the extra seeds, one notebook version each
+SUFFIX = f"_seed{{SEED}}" if SEED else ""  # seed 0 keeps the first run's names
+RUN_NAME = f"rq3_{{ARM}}{{SUFFIX}}"
+TAG = f"{{MODEL_ID}}+lora-{{ARM}}{{SUFFIX.replace('_', '-')}}"  # the `model` field of the saved records
+OUT_DIR = Path(os.environ.get("OUT_DIR", f"/kaggle/working/{{RUN_NAME}}"))
 T_START = time.time()
 assert ARM in ("hard", "soft") and CKPT_EVERY % GRAD_ACCUM == 0
 """ + COMMON_REPORT),
@@ -721,8 +729,9 @@ def validate(df):
 
 Everything needed to continue sits in `OUT_DIR`: the latest adapter and optimizer state (`last/`),
 the best adapter so far (`best/`), and `state.json` (position in the data, training history).
-On start, the most recent `rq3_<arm>` folder found under `/kaggle/input` is copied in, as long as it
-was made with the same clip counts (so a `LIMIT` test run is never resumed by the full run).
+On start, the most recent folder of this run (`rq3_<arm>`, or `rq3_<arm>_seed<N>` for an extra seed) found
+under `/kaggle/input` is copied in, as long as it was made with the same clip counts and seed (so a `LIMIT`
+test run is never resumed by the full run, and seeds never mix).
 """),
         code(r"""
 optimizer = torch.optim.AdamW(trainable, lr=LR, weight_decay=0.0)
@@ -733,7 +742,7 @@ scheduler = torch.optim.lr_scheduler.LambdaLR(
     optimizer, lambda s: min((s + 1) / warmup_steps, max(0.0, (total_steps - s) / max(1, total_steps - warmup_steps))))
 scaler = torch.amp.GradScaler("cuda", enabled=ON_GPU)
 SIZES = {m: len(df) for m, df in splits.items()}
-state = {"arm": ARM, "sizes": SIZES, "epoch": 0, "pos": 0, "opt_step": 0, "loss_sum": 0.0, "loss_n": 0,
+state = {"arm": ARM, "seed": SEED, "sizes": SIZES, "epoch": 0, "pos": 0, "opt_step": 0, "loss_sum": 0.0, "loss_n": 0,
          "oom": 0, "history": [], "best_epoch": None, "best_val_loss": None, "train_done": False}
 
 
@@ -760,18 +769,18 @@ def out_of_time():
 
 
 if read_state(OUT_DIR) is None:
-    found = [(s, Path(p).parent) for p in glob.glob(f"/kaggle/input/**/rq3_{ARM}/state.json", recursive=True)
+    found = [(s, Path(p).parent) for p in glob.glob(f"/kaggle/input/**/{RUN_NAME}/state.json", recursive=True)
              if (s := read_state(Path(p).parent))]
-    usable = [(s, d) for s, d in found if s.get("sizes") == SIZES]
+    usable = [(s, d) for s, d in found if s.get("sizes") == SIZES and s.get("seed", 0) == SEED]
     if len(usable) < len(found):
-        print(f"ignoring {len(found) - len(usable)} earlier run(s) made with different clip counts")
+        print(f"ignoring {len(found) - len(usable)} earlier run(s) made with different clip counts or seed")
     if usable:
         src = max(usable, key=lambda x: x[0].get("saved_at", 0))[1]
         shutil.copytree(src, OUT_DIR, dirs_exist_ok=True)
         print("copied earlier run from", src)
 
 saved = read_state(OUT_DIR)
-if saved and saved.get("sizes") == SIZES:
+if saved and saved.get("sizes") == SIZES and saved.get("seed", 0) == SEED:
     state.update(saved)
     if (OUT_DIR / "last" / "adapter.pt").exists():
         set_peft_model_state_dict(model, torch.load(OUT_DIR / "last" / "adapter.pt", map_location="cpu"))
@@ -797,7 +806,9 @@ def train():
     t_run, n_run = time.time(), 0
     while state["epoch"] < EPOCHS:
         epoch = state["epoch"]
-        order = np.random.default_rng(SEED + epoch).permutation(len(train_df))
+        # seed 0 keeps the first run's order (generator seed = epoch); other seeds use 1000 * SEED + epoch,
+        # so no two runs share an epoch's order
+        order = np.random.default_rng(1000 * SEED + epoch).permutation(len(train_df))
         while state["pos"] < len(order):
             if out_of_time():
                 save_checkpoint()
