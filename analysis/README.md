@@ -12,10 +12,11 @@ CH-SIMS v2(s) clips re-annotated in EmoS.
 | `../kaggle/run_qwen25_omni.ipynb` | Full run: label logits for all clips × 4 conditions, plus verbalized and per-modality generation on the test split; resumable |
 | `../kaggle/rq3_lora_hard.ipynb`, `../kaggle/rq3_lora_soft.ipynb` | RQ3: LoRA fine-tuning on the train split with hard labels (`ds_label`) or soft labels (the 3 annotators' votes), then label logits on the test split; resumable |
 | `rq_analysis.py` | RQ1/RQ2 tables from the full run: `python analysis/rq_analysis.py --runs results/omni_runs --out results/rq_analysis` |
+| `rq1_models.py` | RQ1 models: ordinal regression with a random intercept per video (binary conflict and conflict type), pairwise conflict-type tests with Holm correction, mixed models for the continuous disagreement measures (Basic-7 entropy, GoEmotions entropy, 1 − ds_confidence), robustness checks: `python analysis/rq1_models.py --out results/rq1_models` |
 | `rq3_analysis.py` | RQ3 comparison on the test split: zero-shot, LoRA hard, LoRA soft, each with and without temperature scaling: `python analysis/rq3_analysis.py --out results/rq3_analysis` |
 | `../kaggle/build_notebooks.py` | Builds all Kaggle notebooks from shared cells: edit cells there, then run it |
 
-Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH` for preprocessing.
+Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH` for preprocessing; `scipy` and `statsmodels` for `rq1_models.py`.
 
 ## Workflow
 

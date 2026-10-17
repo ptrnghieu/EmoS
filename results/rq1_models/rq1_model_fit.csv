@@ -1,0 +1,5 @@
+model,video random intercept,log-likelihood,converged,video SD sigma [95% CI],LR stat vs no video effect,p (random effect)
+A: binary conflict,yes,-3975.26141346795,True,"0.21 [0.12, 0.35]",5.700274736428582,0.008481128823871944
+A: binary conflict,no,-3978.1115508361645,True,,,
+B: conflict type,yes,-3968.9565534822614,True,"0.21 [0.13, 0.35]",6.1835961635379135,0.006446997830769889
+B: conflict type,no,-3972.0483515640303,True,,,

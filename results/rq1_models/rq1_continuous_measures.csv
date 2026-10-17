@@ -1,0 +1,16 @@
+measure,clips,model,term,difference [95% CI],p,video variance
+entropy of the 3 Basic-7 votes,4403,binary,conflict,"+0.092 [+0.068, +0.117]",1.0240746830359649e-13,0.0015525725203378424
+entropy of the 3 Basic-7 votes,4403,type,type A,"+0.077 [+0.025, +0.129]",0.0039121483030982555,0.0016571265789713855
+entropy of the 3 Basic-7 votes,4403,type,type T,"+0.075 [+0.041, +0.109]",1.6872437620943163e-05,0.0016571265789713855
+entropy of the 3 Basic-7 votes,4403,type,type V,"+0.111 [+0.074, +0.147]",3.300577474698832e-09,0.0016571265789713855
+entropy of the 3 Basic-7 votes,4403,type,type several,"+0.127 [+0.091, +0.163]",3.119430795986776e-12,0.0016571265789713855
+entropy of pooled GoEmotions labels,4403,binary,conflict,"+0.033 [+0.010, +0.056]",0.00463312031815621,0.002269957814759851
+entropy of pooled GoEmotions labels,4403,type,type A,"+0.049 [+0.000, +0.098]",0.048095436791868666,0.002167313238967009
+entropy of pooled GoEmotions labels,4403,type,type T,"+0.013 [-0.019, +0.045]",0.43748699538016755,0.002167313238967009
+entropy of pooled GoEmotions labels,4403,type,type V,"+0.034 [-0.001, +0.068]",0.055484292009316996,0.002167313238967009
+entropy of pooled GoEmotions labels,4403,type,type several,"+0.074 [+0.040, +0.107]",1.559598325797059e-05,0.002167313238967009
+1 - ds_confidence (Dawid-Skene),4403,binary,conflict,"+0.015 [+0.009, +0.022]",1.1651181236751327e-05,5.651803948656259e-05
+1 - ds_confidence (Dawid-Skene),4403,type,type A,"+0.014 [-0.001, +0.029]",0.05862493171940662,6.041514748673238e-05
+1 - ds_confidence (Dawid-Skene),4403,type,type T,"+0.010 [+0.001, +0.020]",0.03788511809165995,6.041514748673238e-05
+1 - ds_confidence (Dawid-Skene),4403,type,type V,"+0.020 [+0.010, +0.031]",0.0001573977807090923,6.041514748673238e-05
+1 - ds_confidence (Dawid-Skene),4403,type,type several,"+0.016 [+0.006, +0.026]",0.002215156119342736,6.041514748673238e-05

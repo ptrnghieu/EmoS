@@ -25,7 +25,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from rq_analysis import CONDITIONS, LABELS, POLARITY, auroc, entropy, jsd, macro_f1, markdown, odd_one_out, spearman, load_humans
+from rq_analysis import (CONDITIONS, LABELS, POLARITY, auroc, ent_ce, entropy, jsd, load_humans, loo_targets, macro_f1,
+                         markdown, odd_one_out, rank_ok, spearman, tvd)
 
 N_BOOT = 1000
 TEMPERATURES = np.linspace(0.5, 8, 151)
@@ -96,8 +97,12 @@ def main() -> None:
     def stats(P):
         ent = entropy(P)
         pred = np.array(LABELS)[P.argmax(1)]
+        dist_ce, abs_ent_ce, rank = tvd(P, H), np.abs(ent_ce(P, H)), rank_ok(P, H)
         return {
             "JSD to humans": lambda i: jsd(P[i], H[i]).mean(),
+            "DistCE": lambda i: dist_ce[i].mean(),
+            "|EntCE|": lambda i: abs_ent_ce[i].mean(),
+            "RankCS": lambda i: rank[i].mean(),
             "accuracy": lambda i: (pred[i] == gold[i]).mean(),
             "accuracy, all 3 agree": lambda i: (pred[i] == gold[i])[~disagree[i]].mean(),
             "entropy change on conflict": lambda i: ent[i][conflict[i]].mean() - ent[i][~conflict[i]].mean(),
@@ -129,6 +134,25 @@ def main() -> None:
         rows.append({"comparison": f"{a} minus {b}",
                      **{k: boot(lambda i, k=k: sa[k](i) - sb[k](i)) for k in sa}})
     tables["rq3_paired_differences_tav"] = pd.DataFrame(rows)
+
+    # ---- ceiling: hold out one annotator, predict the other two (T+A+V) --------------------------
+    votes = np.stack([test[f"ann{i}"].map(LABELS.index).to_numpy() for i in (1, 2, 3)], axis=1)
+    held_out, others = loo_targets(votes)
+
+    def loo(Q):  # Q: (n, 3, 7) predictions of the other two annotators' distribution
+        j, t = jsd(Q, others).mean(axis=1), tvd(Q, others).mean(axis=1)
+        return {"JSD [95% CI]": boot(lambda i: j[i].mean()), "JSD, no conflict": j[~conflict].mean(),
+                "JSD, conflict": j[conflict].mean(), "DistCE [95% CI]": boot(lambda i: t[i].mean())}
+
+    rows = [{"predictor of the other two annotators": "one held-out annotator (human ceiling)", **loo(held_out)}]
+    for arm in arms:
+        P = dist[arm]["TAV"]
+        rows.append({"predictor of the other two annotators": arm, **loo(np.repeat(P[:, None], 3, axis=1))})
+    for arm in ("zero-shot", "LoRA hard", "LoRA soft"):  # one answer, like the held-out annotator
+        onehot = np.eye(len(LABELS))[dist[arm]["TAV"].argmax(1)]
+        rows.append({"predictor of the other two annotators": f"{arm}, its answer one-hot",
+                     **loo(np.repeat(onehot[:, None], 3, axis=1))})
+    tables["rq3_ceiling_leave_one_out"] = pd.DataFrame(rows)
 
     # ---- every condition -----------------------------------------------------------------------
     rows = []

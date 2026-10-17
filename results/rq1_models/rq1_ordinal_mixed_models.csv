@@ -1,0 +1,19 @@
+model,video random intercept,term,OR [95% CI],p,"p (Holm, conflict-type family)"
+A: binary conflict,yes,conflict,"1.64 [1.44, 1.87]",1.3317557740979845e-13,
+A: binary conflict,yes,intensity |label|,"0.61 [0.50, 0.74]",7.789882867612818e-07,
+A: binary conflict,yes,last batch,"0.78 [0.68, 0.90]",0.0005203792996719778,
+A: binary conflict,no,conflict,"1.62 [1.43, 1.85]",1.3324776480193829e-13,
+A: binary conflict,no,intensity |label|,"0.60 [0.50, 0.73]",1.863749899105574e-07,
+A: binary conflict,no,last batch,"0.77 [0.68, 0.87]",1.3336047088151724e-05,
+B: conflict type,yes,type T,"1.50 [1.25, 1.80]",1.604824473683367e-05,3.209648947366734e-05
+B: conflict type,yes,type A,"1.52 [1.15, 2.01]",0.0034973064071110054,0.0034973064071110054
+B: conflict type,yes,type V,"1.82 [1.49, 2.21]",2.9495279914007983e-09,8.848583974202396e-09
+B: conflict type,yes,type several,"1.97 [1.62, 2.38]",3.9344548713565594e-12,1.5737819485426238e-11
+B: conflict type,yes,intensity |label|,"0.69 [0.56, 0.85]",0.0005931835363063017,
+B: conflict type,yes,last batch,"0.79 [0.68, 0.91]",0.0010822825719362156,
+B: conflict type,no,type T,"1.50 [1.26, 1.80]",9.82947184884595e-06,
+B: conflict type,no,type A,"1.50 [1.14, 1.98]",0.004048355205085833,
+B: conflict type,no,type V,"1.77 [1.46, 2.14]",7.2975537012133534e-09,
+B: conflict type,no,type several,"1.94 [1.61, 2.34]",4.695482595216731e-12,
+B: conflict type,no,intensity |label|,"0.68 [0.55, 0.83]",0.00019015912476851786,
+B: conflict type,no,last batch,"0.78 [0.69, 0.88]",3.575345146403291e-05,

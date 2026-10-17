@@ -43,6 +43,34 @@ def jsd(p: np.ndarray, q: np.ndarray) -> np.ndarray:
     return 0.5 * kl(p, m) + 0.5 * kl(q, m)
 
 
+def tvd(p: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """Total variation distance; DistCE of Baan et al. (2022) when q is the human distribution."""
+    return 0.5 * np.abs(p - q).sum(axis=-1)
+
+
+def ent_ce(p: np.ndarray, human: np.ndarray) -> np.ndarray:
+    """EntCE of Baan et al. (2022): model entropy minus human entropy (signed; > 0 = model less certain)."""
+    return entropy(p) - entropy(human)
+
+
+def rank_ok(p: np.ndarray, human: np.ndarray) -> np.ndarray:
+    """Per-clip RankCS of Baan et al. (2022), with ties: True when every pair of labels that the
+    humans rank differently is ranked the same way by the model. Baan et al. compare full argsorts and
+    leave ties open (their footnote 4); with 3 votes over 7 labels at least 4 labels tie at 0, so
+    pairs the humans tie are left unconstrained. Without ties this equals their definition."""
+    hd = human[:, :, None] - human[:, None, :]
+    md = p[:, :, None] - p[:, None, :]
+    return ((hd <= 0) | (md > 0)).all(axis=(1, 2))
+
+
+def loo_targets(votes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Leave-one-annotator-out: for each clip and annotator i, the one-hot vote of i and the
+    distribution of the other two votes. votes: (n, 3) label indices. Returns (n, 3, 7) arrays."""
+    onehot = np.eye(len(LABELS))[votes]
+    others = (onehot.sum(axis=1, keepdims=True) - onehot) / (votes.shape[1] - 1)
+    return onehot, others
+
+
 def spearman(x, y) -> float:
     return float(pd.Series(x).rank().corr(pd.Series(y).rank()))
 
@@ -267,6 +295,38 @@ def rq2(h: pd.DataFrame, s: pd.DataFrame) -> dict[str, pd.DataFrame]:
                      "no conflict": tav[tav.conflict == 0]._jsd.mean(),
                      "conflict": tav[tav.conflict == 1]._jsd.mean()})
     out["rq2_jsd_to_humans"] = pd.DataFrame(rows)
+
+    # calibration to human disagreement (Baan et al., 2022): DistCE = TVD to the 3-vote distribution,
+    # EntCE = model entropy minus human entropy, RankCS = share of clips with the human label ranking
+    rows = []
+    for cond in CONDITIONS:
+        for name, sub in [("all", df[df.condition == cond]), ("no conflict", df[(df.condition == cond) & (df.conflict == 0)]),
+                          ("conflict", df[(df.condition == cond) & (df.conflict == 1)])]:
+            P, Hs = np.stack(sub.model_dist), np.stack(sub.human_dist)
+            e = ent_ce(P, Hs)
+            rows.append({"condition": cond, "clips": name, "n": len(sub), "mean DistCE": tvd(P, Hs).mean(),
+                         "mean |EntCE|": np.abs(e).mean(), "mean EntCE (signed)": e.mean(),
+                         "RankCS": rank_ok(P, Hs).mean()})
+    out["rq2_human_calibration"] = pd.DataFrame(rows)
+
+    # ceiling: hold out one annotator and predict the other two. The held-out person's own vote is
+    # the human reference; the model predicts the same two-vote targets, so the numbers compare.
+    votes = np.stack([tav[f"ann{i}"].map(LABELS.index).to_numpy() for i in (1, 2, 3)], axis=1)
+    held_out, others = loo_targets(votes)
+    P = np.stack(tav.model_dist)
+    predictors = {
+        "one held-out annotator (human ceiling)": held_out,
+        "model (T+A+V)": np.repeat(P[:, None], 3, axis=1),
+        "model's own answer, one-hot": np.repeat(np.eye(len(LABELS))[[LABELS.index(l) for l in tav.pred]][:, None], 3, axis=1),
+        "label prior of the dataset": np.broadcast_to(prior, others.shape),
+    }
+    conflict = tav.conflict.to_numpy() == 1
+    rows = []
+    for name, Q in predictors.items():
+        j, t = jsd(Q, others).mean(axis=1), tvd(Q, others).mean(axis=1)
+        rows.append({"predictor of the other two annotators": name, "JSD, all": j.mean(), "JSD, no conflict": j[~conflict].mean(),
+                     "JSD, conflict": j[conflict].mean(), "DistCE, all": t.mean()})
+    out["rq2_ceiling_leave_one_out"] = pd.DataFrame(rows)
 
     # H2a: on clips where exactly one modality disagrees with the other two, how often does the
     # answer take the odd modality's polarity? Humans (all six annotators pooled) vs the model.
