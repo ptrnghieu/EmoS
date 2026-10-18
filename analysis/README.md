@@ -13,6 +13,7 @@ CH-SIMS v2(s) clips re-annotated in EmoS.
 | `../kaggle/rq3_lora_hard.ipynb`, `../kaggle/rq3_lora_soft.ipynb` | RQ3: LoRA fine-tuning on the train split with hard labels (`ds_label`) or soft labels (the 3 annotators' votes), then label logits on the test split; resumable |
 | `rq_analysis.py` | RQ1/RQ2 tables from the full run: `python analysis/rq_analysis.py --runs results/omni_runs --out results/rq_analysis` |
 | `rq1_models.py` | RQ1 models: ordinal regression with a random intercept per video (binary conflict and conflict type), pairwise conflict-type tests with Holm correction, mixed models for the continuous disagreement measures (Basic-7 entropy, GoEmotions entropy, 1 − ds_confidence), robustness checks: `python analysis/rq1_models.py --out results/rq1_models` |
+| `rq2_compare_models.py` | RQ2 across models: Qwen2.5-Omni-7B vs MiniCPM-o 2.6 per condition, with paired bootstrap differences: `python analysis/rq2_compare_models.py --out results/rq2_compare_models` |
 | `rq3_analysis.py` | RQ3 comparison on the test split: zero-shot, LoRA hard, LoRA soft, each with and without temperature scaling: `python analysis/rq3_analysis.py --out results/rq3_analysis` |
 | `../kaggle/run_minicpm_o.ipynb` | RQ2 with a second model: MiniCPM-o 2.6 label scoring, all clips × 4 conditions, same record format; resumable |
 | `../kaggle/build_notebooks.py` | Builds all Kaggle notebooks from shared cells: edit cells there, then run it |
@@ -43,7 +44,7 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
    Results: `rq3_<arm>/scores.jsonl` (same format as `omni_runs/scores.jsonl`, `model` = `<model>+lora-<arm>`)
    and `rq3_<arm>/state.json` (training history). Copy both folders to `results/rq3/`, then run `rq3_analysis.py`.
 8. **Second model**: `kaggle/run_minicpm_o.ipynb` with the same settings (pins `transformers==4.48.3`, see the notebook).
-   Results: `minicpm_runs/scores.jsonl`.
+   Results: `minicpm_runs/scores.jsonl`; copy to `results/minicpm_runs/`, then run `rq_analysis.py --runs results/minicpm_runs --out results/rq_analysis_minicpm` and `rq2_compare_models.py`.
 
 ## Note on clip ids
 

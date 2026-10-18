@@ -1,0 +1,5 @@
+condition,"Spearman(model entropy, human entropy) [95% CI]",AUROC: model entropy flags human disagreement [95% CI]
+TAV,"0.135 [0.105, 0.165]","0.593 [0.575, 0.611]"
+T,"0.067 [0.038, 0.097]","0.550 [0.532, 0.567]"
+A,"0.099 [0.066, 0.132]","0.558 [0.540, 0.577]"
+V,"0.008 [-0.020, 0.039]","0.520 [0.505, 0.535]"
