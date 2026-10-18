@@ -4,7 +4,8 @@
 
 Writes kaggle/benchmark_qwen25_omni.ipynb (speed test), kaggle/run_qwen25_omni.ipynb (full run),
 kaggle/rq3_lora_{hard,soft}.ipynb (RQ3 fine-tuning, one notebook per arm), and the RQ2 label scoring
-with further model families: kaggle/run_minicpm_o.ipynb (MiniCPM-o 2.6), kaggle/run_gemma4.ipynb (Gemma 4 E4B-it).
+with further model families: kaggle/run_minicpm_o.ipynb (MiniCPM-o 2.6), kaggle/run_gemma4.ipynb (Gemma 4 E4B-it),
+kaggle/run_phi4mm.ipynb (Phi-4-multimodal-instruct).
 Edit the cells here, not in the .ipynb files.
 """
 
@@ -1439,10 +1440,200 @@ if len(ok):
 ]
 
 
+# ---- fourth model: Phi-4-multimodal-instruct, label scoring only ------------------------
+
+PHI4MM = [
+    md(r"""
+# RQ2, fourth model: Phi-4-multimodal-instruct on CH-SIMS v2 (Kaggle, 2× T4)
+
+Repeats the label scoring of the other runs with a model from a fourth family (Microsoft Phi): all 4,403 clips
+× 4 conditions (T+A+V, T, A, V), the same question and the same record format (logits of the 7 labels'
+first tokens + log-sum-exp), written to `/kaggle/working/phi4mm_runs/scores.jsonl`.
+
+How the inputs follow the model card (the model's own code and processor are used unchanged):
+- Prompt `<|user|><|image_1|>…<|image_k|><|audio_1|>{text}<|end|><|assistant|>`: frames first, then audio, then text
+  (the card's vision-speech format); no system prompt. All extracted frames go in as separate images
+  (a 448-px frame becomes one crop plus the global view, about 430 tokens).
+- The model switches its LoRA adapters by input type, as in its own `forward`: images (with or without audio) →
+  vision adapter, and the audio then goes through the projection trained for that mode; audio only → speech adapter;
+  text only → no adapter. The card notes that in vision-speech training the audio mostly carried a spoken query,
+  which matters for reading the T+A+V results.
+
+**Precision.** T4 has no bf16; the checkpoint is bf16. The language model runs in fp16, the image and audio
+encoders in fp32, and each record stores `max_abs_act` (the largest activation in the language model) so fp16
+overflow (above 65,504) is visible, as in the Gemma 4 run.
+
+**Versions.** `transformers==4.48.2` and `peft==0.13.2`, as the model card pins; attention `sdpa` (no flash-attn on T4).
+Checked locally with the model's code on a small random-weight copy: the scored logits match those of the
+model's own `generate` in each condition.
+
+**Running it**
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: the preprocessed `chsims-mm` dataset.
+2. First set `LIMIT = 10` and run all interactively: check the load report, the `label mass`, the activation check
+   and the timing lines, and send them over before the full run.
+3. Full run: `LIMIT = None`, **Save Version → Save & Run All (Commit)**. It stops after `TIME_BUDGET_H`;
+   to continue, add this notebook's output as an input and commit again.
+"""),
+    code(r"""
+# Pins from the model card. peft is needed by the model's own code (its LoRA adapters).
+%pip install -q "transformers==4.48.2" "peft==0.13.2" backoff accelerate librosa soundfile
+"""),
+    code(r"""
+import glob
+import json
+import os
+import shutil
+import time
+from pathlib import Path
+
+import librosa
+import numpy as np
+import pandas as pd
+import torch
+from PIL import Image
+
+MODEL_ID = os.environ.get("MODEL_ID", "microsoft/Phi-4-multimodal-instruct")  # env override: local tests with a tiny model
+REVISION = os.environ.get("REVISION", "93f923e1a7727d1c4f446756212d9d3e8fcc5d81")  # main on 2026-10-18
+SPLIT_LAYER = 14             # language-model layers 0..13 on GPU 0 (with the encoders), the rest on GPU 1
+TIME_BUDGET_H = 11.0         # stop starting new items after this many hours
+LIMIT = None                 # e.g. 10 for a quick check: 10 test clips + 10 other clips
+SR = 16000
+OUT_DIR = Path(os.environ.get("OUT_DIR", "/kaggle/working/phi4mm_runs"))
+T_START = time.time()
+
+DATA_DIR = os.environ.get("CHSIMS_MM_DIR")
+if DATA_DIR is None:
+    hits = glob.glob("/kaggle/input/**/manifest.csv", recursive=True)
+    assert hits, "No manifest.csv under /kaggle/input: attach the preprocessed dataset."
+    DATA_DIR = os.path.dirname(hits[0])
+DATA_DIR = Path(DATA_DIR)
+DRY_RUN = False
+""" + COMMON_REPORT),
+    *SCORE_CLIPS,
+    md(r"""
+## Load the model
+
+Language model in fp16, the image and audio encoders (`embed_tokens_extend`) in fp32. On GPU the layers are
+placed by hand: the encoders sit with the token embeddings (the model writes their outputs into the embedding
+tensor), and the output layer shares its weights with the token embeddings, so it stays on GPU 0 too.
+"""),
+    code(r"""
+from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
+
+ON_GPU = torch.cuda.is_available()
+LLM_DTYPE = torch.float16 if ON_GPU else torch.float32
+kwargs = dict(revision=REVISION, trust_remote_code=True, torch_dtype=LLM_DTYPE, _attn_implementation="sdpa")
+if ON_GPU:
+    n_layers = AutoConfig.from_pretrained(MODEL_ID, revision=REVISION, trust_remote_code=True).num_hidden_layers
+    device_map = {"model.embed_tokens": 0, "model.embed_tokens_extend": 0, "lm_head": 0}
+    device_map.update({f"model.layers.{i}": 0 if i < SPLIT_LAYER else 1 for i in range(n_layers)})
+    device_map["model.norm"] = 1
+    kwargs["device_map"] = device_map
+t0 = time.time()
+processor = AutoProcessor.from_pretrained(MODEL_ID, revision=REVISION, trust_remote_code=True)
+tokenizer = processor.tokenizer
+model = AutoModelForCausalLM.from_pretrained(MODEL_ID, **kwargs).eval()
+model.model.embed_tokens_extend.float()
+DEVICE = model.model.embed_tokens.weight.device
+
+ACT = {"max": 0.0}
+
+
+def track(x):
+    ACT["max"] = max(ACT["max"], float(x.detach().abs().amax()))
+
+
+for layer in model.model.layers:
+    layer.register_forward_hook(lambda m, args, out: track(out[0] if isinstance(out, tuple) else out))
+    layer.mlp.down_proj.register_forward_pre_hook(lambda m, args: track(args[0]))
+
+print(f"loaded in {time.time() - t0:.0f} s | language model {LLM_DTYPE}, encoders {model.model.embed_tokens_extend.image_embed.img_projection[0].weight.dtype}")
+for i in range(torch.cuda.device_count()):
+    print(f"cuda:{i} allocated after load: {torch.cuda.memory_allocated(i) / 2**30:.1f} GiB")
+"""),
+    md(r"""
+## Prompts and label scoring
+
+Same wording as the other runs. The processor sets `input_mode` (0 text, 1 vision, 2 speech, 3 vision + speech),
+from which the model picks its LoRA adapter.
+"""),
+    code(r"""
+LABELS = ["Anger", "Disgust", "Fear", "Joy", "Neutral", "Sadness", "Surprise"]
+DESCRIBE = {
+    "TAV": "the video frames, the audio track and the transcript",
+    "T": "only the transcript",
+    "A": "only the audio track",
+    "V": "only the video frames, without sound",
+}
+CONDITIONS = list(DESCRIBE)
+ASK = f"Which emotion does the speaker express? Choose exactly one of: {', '.join(LABELS)}.\nAnswer with the label only."
+label_first_ids = [tokenizer.encode(l, add_special_tokens=False)[0] for l in LABELS]
+assert len(set(label_first_ids)) == len(LABELS), "two labels share a first token"
+
+
+def prepare(row, condition):
+    images, audios, tags = None, None, ""
+    if "V" in condition:
+        frames = sorted(glob.glob(str(DATA_DIR / row["frames_dir"] / "*.jpg")))
+        images = [Image.open(f).convert("RGB") for f in frames]
+        tags += "".join(f"<|image_{i + 1}|>" for i in range(len(images)))
+    if "A" in condition:
+        audios = [(librosa.load(str(DATA_DIR / row["audio_path"]), sr=SR, mono=True)[0], SR)]
+        tags += "<|audio_1|>"
+    text = f"You are given {DESCRIBE[condition]} of a speaker in a scene from a Chinese film or TV series.\n"
+    if "T" in condition:
+        text += f"Transcript: {row['text']}\n"
+    prompt = f"<|user|>{tags}{text}{ASK}<|end|><|assistant|>"
+    return processor(text=prompt, images=images, audios=audios, return_tensors="pt").to(DEVICE)
+
+
+@torch.inference_mode()
+def label_logits(inputs):
+    return model(**inputs, num_logits_to_keep=1).logits[0, -1].float()
+
+
+import re
+
+inputs = prepare(clips.iloc[0], "TAV")
+shown = re.sub(r"((<\|endoftext1[01]\|>)\2*)", lambda m: f"[{m.group(1).count(m.group(2))} x {m.group(2)}]",
+               tokenizer.decode(inputs["input_ids"][0]))  # image (10) and audio (11) placeholder runs
+print(inputs["input_ids"].shape[1], "tokens | input_mode", inputs["input_mode"].tolist(), "| prompt:\n", shown)
+"""),
+    *score_cells("phi4mm_runs", r"""
+def run_score(row, condition):
+    t0 = time.perf_counter()
+    inputs = prepare(row, condition)
+    t1 = time.perf_counter()
+    ACT["max"] = 0.0
+    logits = label_logits(inputs)
+    rec = {"model": MODEL_ID, "uid": row["uid"], "condition": condition, "task": "score",
+           "n_tokens": int(inputs["input_ids"].shape[1]), "input_mode": int(inputs["input_mode"][0]),
+           "prep_s": round(t1 - t0, 3), "gpu_s": round(time.perf_counter() - t1, 3),
+           "finite": bool(torch.isfinite(logits).all()), "max_abs_act": ACT["max"],
+           "lse": float(torch.logsumexp(logits, dim=-1))}
+    rec.update({f"logit_{l}": float(v) for l, v in zip(LABELS, logits[label_first_ids].tolist())})
+    return rec
+"""),
+    md(r"""
+## fp16 check
+
+fp16 overflows above 65,504. Items whose largest activation passes 30,000 are too close: if there are
+any, do not start the full run.
+"""),
+    code(r"""
+if len(ok):
+    print(ok.groupby("condition")["max_abs_act"].describe(percentiles=[0.5, 0.99]).round(1).to_string())
+    near = ok[(ok["max_abs_act"] > 30000) | ~ok["finite"].astype(bool)]
+    print(f"items near fp16 overflow or not finite: {len(near)}")
+"""),
+]
+
+
 if __name__ == "__main__":
     write(HERE / "benchmark_qwen25_omni.ipynb", BENCHMARK)
     write(HERE / "run_qwen25_omni.ipynb", RUN)
     write(HERE / "run_minicpm_o.ipynb", MINICPM)
     write(HERE / "run_gemma4.ipynb", GEMMA4)
+    write(HERE / "run_phi4mm.ipynb", PHI4MM)
     for arm in ("hard", "soft"):
         write(HERE / f"rq3_lora_{arm}.ipynb", rq3_cells(arm))
