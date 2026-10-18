@@ -5,7 +5,8 @@
 Writes kaggle/benchmark_qwen25_omni.ipynb (speed test), kaggle/run_qwen25_omni.ipynb (full run),
 kaggle/rq3_lora_{hard,soft}.ipynb (RQ3 fine-tuning, one notebook per arm), and the RQ2 label scoring
 with further model families: kaggle/run_minicpm_o.ipynb (MiniCPM-o 2.6), kaggle/run_gemma4.ipynb (Gemma 4 E4B-it),
-kaggle/run_phi4mm.ipynb (Phi-4-multimodal-instruct).
+kaggle/run_phi4mm.ipynb (Phi-4-multimodal-instruct), kaggle/run_emotion_llama.ipynb (Emotion-LLaMA,
+which runs kaggle/score_emotion_llama.py in its own Python 3.9 environment).
 Edit the cells here, not in the .ipynb files.
 """
 
@@ -1629,11 +1630,181 @@ if len(ok):
 ]
 
 
+# ---- fifth model: Emotion-LLaMA (emotion specialist), label scoring only -----------------
+
+EMOLLAMA_PINS = [  # environment.yaml of the repository, plus the README's extra installs; unpinned ones fixed here
+    "huggingface-hub==0.18.0", "pyyaml==6.0", "regex==2022.10.31", "tokenizers==0.13.2", "tqdm==4.64.1",
+    "transformers==4.30.0", "timm==0.6.13", "webdataset==0.2.48", "omegaconf==2.3.0", "opencv-python==4.7.0.72",
+    "decord==0.6.0", "peft==0.2.0", "accelerate==0.20.3", "iopath==0.1.10", "matplotlib==3.7.0", "psutil==5.9.4",
+    "wandb==0.16.0", "moviepy==1.0.3", "soundfile==0.12.1", "sentencepiece==0.2.2", "numpy==1.26.4",
+    "pandas==2.3.3", "setuptools==69.5.1",
+]
+
+EMOLLAMA = [
+    md(r"""
+# RQ2, emotion specialist: Emotion-LLaMA on CH-SIMS v2 (Kaggle, 2× T4)
+
+Label scoring with Emotion-LLaMA (Cheng et al., NeurIPS 2024; Llama-2-7B-chat + LoRA, EVA-CLIP image
+encoder, HuBERT audio features), the one non-Qwen model trained for multimodal emotion recognition.
+All 4,403 clips × 4 conditions, written to `/kaggle/working/emollama_runs/scores.jsonl` in the format of the other runs.
+
+**Environment.** The repository needs Python 3.9 (torch 2.0, transformers 4.30, peft 0.2.0); Kaggle runs 3.13.
+This notebook builds a separate Python 3.9 environment with `uv`, installs the repository's pins, and runs
+`score_emotion_llama.py` in it. The model is built by the authors' own code (demo config), unchanged.
+
+**What the model sees** (details in the script's docstring):
+- the clip's first extracted frame (the demo uses the first frame), HuBERT features of the audio (as the demo),
+  zeros for the FaceMAE and VideoMAE features (as the demo: the authors publish no extraction for raw clips);
+- the evaluation instruction of the authors' dataset code, with the Chinese transcript;
+- the checkpoint's six labels in the order of its training instruction: happy, sad, neutral, angry, worried, surprise.
+  "worried" is recorded as Fear (the authors' zero-shot alias). **There is no Disgust**: `logit_Disgust` is empty,
+  and the comparison with humans uses the six labels.
+- T, A and V alone were never seen in training (T: no media; A: only the three feature tokens; V: audio feature zero).
+
+**Weights** (pinned revisions): the demo checkpoint `Emoation_LLaMA.pth` from the authors' Hugging Face Space,
+Llama-2-7b-chat from the mirror the Space itself uses, `TencentGameMate/chinese-hubert-large`, and EVA-CLIP-g,
+which the repository's code downloads. Licences: the repository is CC BY-NC 4.0 plus the Llama 2 licence; research use.
+
+**Precision and memory.** As in the authors' evaluation config: Llama in fp16 (`low_resource: False`), split over
+the two GPUs; EVA in fp16; HuBERT in fp32. The script checks that every tensor of the checkpoint was loaded
+(the authors' loader uses `strict=False`).
+
+**Running it**
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: the preprocessed `chsims-mm` dataset.
+2. First set `LIMIT = 10` and run all interactively (about 25 GB of downloads): check the checkpoint line,
+   the label tokens, the prompts, the `label mass` and the timing lines, and send them over before the full run.
+3. Full run: `LIMIT = None`, **Save Version → Save & Run All (Commit)**. It stops after `TIME_BUDGET_H`;
+   to continue, add this notebook's output as an input and commit again.
+"""),
+    code(r"""
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+
+TIME_BUDGET_H = 11.0         # stop starting new items after this many hours (counted from the start of the notebook)
+LIMIT = None                 # e.g. 10 for a quick check: 10 test clips + 10 other clips
+SPLIT_LAYER = 14             # Llama layers 0..13 on GPU 0 (with EVA), the rest on GPU 1 (with HuBERT)
+OUT_DIR = Path(os.environ.get("OUT_DIR", "/kaggle/working/emollama_runs"))
+WORK = Path(os.environ.get("EMOLLAMA_WORK", "/tmp/emollama"))  # environment, code, weights: not part of the output
+ENV_PY = Path(os.environ.get("EMOLLAMA_PY", WORK / "env" / "bin" / "python"))
+REPO = Path(os.environ.get("EMOLLAMA_REPO", WORK / "Emotion-LLaMA"))
+REPO_COMMIT = "6f8d05087b2a91e445ad986545977fda7eb1b6a4"           # main on 2026-10-18
+LLAMA_REPO, LLAMA_REV = "ZebangCheng/Emotion-LLaMA", "2ba523d3543da46b9f8b6dab308f2a56298c9e37"
+SPACE_REPO, SPACE_REV = "ZebangCheng/Emotion-LLaMA", "9cc18338a896d6aa6a3090bbf37055bf93909b73"
+HUBERT_REPO, HUBERT_REV = "TencentGameMate/chinese-hubert-large", "90cb660492214f687e60f5ca509b20edae6e75bd"
+MODEL_NAME = "ZebangCheng/Emotion-LLaMA (Emoation_LLaMA.pth)"
+T_START = time.time()
+
+DATA_DIR = os.environ.get("CHSIMS_MM_DIR")
+if DATA_DIR is None:
+    hits = glob.glob("/kaggle/input/**/manifest.csv", recursive=True)
+    assert hits, "No manifest.csv under /kaggle/input: attach the preprocessed dataset."
+    DATA_DIR = os.path.dirname(hits[0])
+DATA_DIR = Path(DATA_DIR)
+DRY_RUN = False
+WORK.mkdir(parents=True, exist_ok=True)
+
+
+def sh(cmd):
+    print("$", cmd, flush=True)
+    subprocess.run(cmd, shell=True, check=True)
+""" + COMMON_REPORT),
+    md("## Python 3.9 environment and the repository"),
+    code(r"""
+PINS = """ + repr(EMOLLAMA_PINS) + r"""
+if not ENV_PY.exists():
+    sh(f"{sys.executable} -m pip install -q uv")
+    sh(f"{sys.executable} -m uv venv -q --python 3.9 {ENV_PY.parent.parent}")  # uv fetches a Python 3.9 build
+    sh(f"{sys.executable} -m uv pip install -q --python {ENV_PY} torch==2.0.0 torchvision==0.15.1 torchaudio==2.0.1 "
+       "--index-url https://download.pytorch.org/whl/cu118")
+    sh(f"{sys.executable} -m uv pip install -q --python {ENV_PY} " + " ".join(f'"{p}"' for p in PINS))
+sh(f"{ENV_PY} -c 'import sys, torch, transformers, peft; print(sys.version.split()[0], torch.__version__, "
+   "transformers.__version__, peft.__version__, \"cuda:\", torch.cuda.is_available())'")
+if not REPO.exists():
+    sh(f"git clone -q https://github.com/ZebangCheng/Emotion-LLaMA.git {REPO}")
+    sh(f"git -C {REPO} checkout -q {REPO_COMMIT}")
+sh(f"git -C {REPO} log -1 --format='%H %cd'")
+"""),
+    md("## Weights"),
+    code(r"""
+from huggingface_hub import hf_hub_download, snapshot_download
+
+if os.environ.get("EMOLLAMA_LOCAL"):  # local test with small stand-ins
+    LLAMA, CKPT, HUBERT = os.environ["EMOLLAMA_LLAMA"], os.environ["EMOLLAMA_CKPT"], os.environ["EMOLLAMA_HUBERT"]
+else:
+    t0 = time.time()
+    LLAMA = snapshot_download(LLAMA_REPO, revision=LLAMA_REV, local_dir=WORK / "llama", allow_patterns=[
+        "config.json", "generation_config.json", "model.safetensors.index.json", "model-*.safetensors",
+        "tokenizer.model", "tokenizer_config.json", "special_tokens_map.json", "added_tokens.json"])
+    CKPT = hf_hub_download(SPACE_REPO, "Emoation_LLaMA.pth", repo_type="space", revision=SPACE_REV, local_dir=WORK / "ckpt")
+    HUBERT = snapshot_download(HUBERT_REPO, revision=HUBERT_REV, local_dir=WORK / "hubert",
+                               allow_patterns=["config.json", "preprocessor_config.json", "pytorch_model.bin"])
+    print(f"downloaded in {time.time() - t0:.0f} s | free disk on / (GB): {shutil.disk_usage('/').free / 1e9:.1f}")
+print(LLAMA, CKPT, HUBERT, sep="\n")
+"""),
+    md(r"""
+## Scoring script
+
+Runs in the Python 3.9 environment. Kept in this repository as `kaggle/score_emotion_llama.py`; the cell
+below writes the same file.
+"""),
+    code("%%writefile score_emotion_llama.py\n" + (HERE / "score_emotion_llama.py").read_text(encoding="utf-8")),
+    md("## Run"),
+    code(r"""
+cmd = [str(ENV_PY), "-u", "score_emotion_llama.py", "--repo", str(REPO), "--data-dir", str(DATA_DIR),
+       "--out-dir", str(OUT_DIR), "--llama", str(LLAMA), "--ckpt", str(CKPT), "--hubert", str(HUBERT),
+       "--model-name", MODEL_NAME, "--split-layer", str(SPLIT_LAYER), "--limit", str(LIMIT or 0),
+       "--time-budget-h", str(TIME_BUDGET_H - (time.time() - T_START) / 3600),
+       "--resume-glob", "/kaggle/input/**/emollama_runs/scores.jsonl"]
+if os.environ.get("EMOLLAMA_CPU_TEST"):
+    cmd.append("--cpu-test")
+proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+for line in proc.stdout:
+    if "%|" not in line:  # leave out download progress bars
+        print(line, end="", flush=True)
+assert proc.wait() == 0, "the scoring script failed: see the lines above"
+"""),
+    md(r"""
+## Progress and quick checks
+
+Six labels: `label_mass` is the probability the model puts on the first tokens of its six labels;
+accuracy is against the majority label, on all clips and on clips whose majority label is not Disgust.
+"""),
+    code(r"""
+SIX = ["Anger", "Fear", "Joy", "Neutral", "Sadness", "Surprise"]
+manifest = pd.read_csv(DATA_DIR / "manifest.csv", dtype={"video_id": str, "clip_id": str})
+s = pd.DataFrame([json.loads(l) for l in open(OUT_DIR / "scores.jsonl", encoding="utf-8") if l.strip()])
+ok = s[s.get("error", pd.Series(index=s.index, dtype=object)).isna()] if len(s) else s
+n_items = int((manifest["status"] == "ok").sum()) * 4 if not LIMIT else None
+print(f"{len(ok)} items done" + (f" of {n_items}" if n_items else ""), "| OOM:", int((s.get("error") == "oom").sum()) if "error" in s else 0)
+if len(ok):
+    p = np.exp(ok[[f"logit_{l}" for l in SIX]].to_numpy(dtype=float) - ok[["lse"]].to_numpy())
+    ok = ok.assign(label_mass=p.sum(1), pred=np.array(SIX)[p.argmax(1)]).merge(manifest[["uid", "ds_label"]], on="uid")
+    ok["hit"] = ok["pred"] == ok["ds_label"]
+    print(ok.groupby("condition").agg(n=("uid", "size"), label_mass=("label_mass", "mean"), accuracy=("hit", "mean"),
+                                      accuracy_no_disgust=("hit", lambda x: x[ok.loc[x.index, "ds_label"] != "Disgust"].mean()),
+                                      nonfinite=("finite", lambda x: int((~x.astype(bool)).sum())),
+                                      gpu_s=("gpu_s", "mean"), prep_s=("prep_s", "mean"), tokens=("n_tokens", "mean")).round(3).to_string())
+    print(ok.groupby("condition")["pred"].value_counts(normalize=True).unstack().round(2).to_string())
+"""),
+]
+
+
 if __name__ == "__main__":
     write(HERE / "benchmark_qwen25_omni.ipynb", BENCHMARK)
     write(HERE / "run_qwen25_omni.ipynb", RUN)
     write(HERE / "run_minicpm_o.ipynb", MINICPM)
     write(HERE / "run_gemma4.ipynb", GEMMA4)
     write(HERE / "run_phi4mm.ipynb", PHI4MM)
+    write(HERE / "run_emotion_llama.ipynb", EMOLLAMA)
     for arm in ("hard", "soft"):
         write(HERE / f"rq3_lora_{arm}.ipynb", rq3_cells(arm))
