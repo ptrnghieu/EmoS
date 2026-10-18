@@ -1460,9 +1460,10 @@ How the inputs follow the model card (the model's own code and processor are use
   text only → no adapter. The card notes that in vision-speech training the audio mostly carried a spoken query,
   which matters for reading the T+A+V results.
 
-**Precision.** T4 has no bf16; the checkpoint is bf16. The language model runs in fp16, the image and audio
-encoders in fp32, and each record stores `max_abs_act` (the largest activation in the language model) so fp16
-overflow (above 65,504) is visible, as in the Gemma 4 run.
+**Precision.** T4 has no bf16; the checkpoint is bf16. The whole model runs in fp16, as the Qwen and MiniCPM
+runs (with fp32 encoders, clips with many frames ran out of memory in the first check). Each record stores
+`max_abs_act` (the largest activation in the language model) so fp16 overflow (above 65,504) is visible, and
+`top_token`, the most likely next token over the whole vocabulary.
 
 **Versions.** `transformers==4.48.2` and `peft==0.13.2`, as the model card pins; attention `sdpa` (no flash-attn on T4).
 Checked locally with the model's code on a small random-weight copy: the scored logits match those of the
@@ -1495,7 +1496,7 @@ from PIL import Image
 
 MODEL_ID = os.environ.get("MODEL_ID", "microsoft/Phi-4-multimodal-instruct")  # env override: local tests with a tiny model
 REVISION = os.environ.get("REVISION", "93f923e1a7727d1c4f446756212d9d3e8fcc5d81")  # main on 2026-10-18
-SPLIT_LAYER = 14             # language-model layers 0..13 on GPU 0 (with the encoders), the rest on GPU 1
+SPLIT_LAYER = 8              # language-model layers 0..7 on GPU 0 (with the encoders), the rest on GPU 1
 TIME_BUDGET_H = 11.0         # stop starting new items after this many hours
 LIMIT = None                 # e.g. 10 for a quick check: 10 test clips + 10 other clips
 SR = 16000
@@ -1514,8 +1515,7 @@ DRY_RUN = False
     md(r"""
 ## Load the model
 
-Language model in fp16, the image and audio encoders (`embed_tokens_extend`) in fp32. On GPU the layers are
-placed by hand: the encoders sit with the token embeddings (the model writes their outputs into the embedding
+All in fp16. On GPU the layers are placed by hand: the encoders sit with the token embeddings (the model writes their outputs into the embedding
 tensor), and the output layer shares its weights with the token embeddings, so it stays on GPU 0 too.
 """),
     code(r"""
@@ -1534,7 +1534,6 @@ t0 = time.time()
 processor = AutoProcessor.from_pretrained(MODEL_ID, revision=REVISION, trust_remote_code=True)
 tokenizer = processor.tokenizer
 model = AutoModelForCausalLM.from_pretrained(MODEL_ID, **kwargs).eval()
-model.model.embed_tokens_extend.float()
 DEVICE = model.model.embed_tokens.weight.device
 
 ACT = {"max": 0.0}
@@ -1600,6 +1599,25 @@ shown = re.sub(r"((<\|endoftext1[01]\|>)\2*)", lambda m: f"[{m.group(1).count(m.
                tokenizer.decode(inputs["input_ids"][0]))  # image (10) and audio (11) placeholder runs
 print(inputs["input_ids"].shape[1], "tokens | input_mode", inputs["input_mode"].tolist(), "| prompt:\n", shown)
 """),
+    md(r"""
+## Memory check
+
+The clip with the most frames (then the longest audio) under T+A+V, the most memory-hungry item of the run.
+If this cell runs out of memory, lower `SPLIT_LAYER` and restart.
+"""),
+    code(r"""
+longest = manifest[manifest["status"] == "ok"].sort_values(["n_frames", "duration"]).iloc[-1]
+for d in range(torch.cuda.device_count()):
+    torch.cuda.reset_peak_memory_stats(d)
+t0 = time.perf_counter()
+inputs = prepare(longest, "TAV")
+logits = label_logits(inputs)
+print(f"{longest['uid']}: {longest['n_frames']} frames, {longest['duration']:.1f} s, {inputs['input_ids'].shape[1]} tokens, "
+      f"{time.perf_counter() - t0:.1f} s | peak GiB:",
+      [round(torch.cuda.max_memory_allocated(d) / 2**30, 1) for d in range(torch.cuda.device_count())])
+del inputs, logits
+torch.cuda.empty_cache()
+"""),
     *score_cells("phi4mm_runs", r"""
 def run_score(row, condition):
     t0 = time.perf_counter()
@@ -1611,6 +1629,7 @@ def run_score(row, condition):
            "n_tokens": int(inputs["input_ids"].shape[1]), "input_mode": int(inputs["input_mode"][0]),
            "prep_s": round(t1 - t0, 3), "gpu_s": round(time.perf_counter() - t1, 3),
            "finite": bool(torch.isfinite(logits).all()), "max_abs_act": ACT["max"],
+           "top_token": tokenizer.decode([int(logits.argmax())]),
            "lse": float(torch.logsumexp(logits, dim=-1))}
     rec.update({f"logit_{l}": float(v) for l, v in zip(LABELS, logits[label_first_ids].tolist())})
     return rec
