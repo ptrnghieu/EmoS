@@ -3,8 +3,8 @@
     python kaggle/build_notebooks.py
 
 Writes kaggle/benchmark_qwen25_omni.ipynb (speed test), kaggle/run_qwen25_omni.ipynb (full run),
-kaggle/rq3_lora_{hard,soft}.ipynb (RQ3 fine-tuning, one notebook per arm) and kaggle/run_minicpm_o.ipynb
-(RQ2 label scoring with a second model).
+kaggle/rq3_lora_{hard,soft}.ipynb (RQ3 fine-tuning, one notebook per arm), and the RQ2 label scoring
+with further model families: kaggle/run_minicpm_o.ipynb (MiniCPM-o 2.6), kaggle/run_gemma4.ipynb (Gemma 4 E4B-it).
 Edit the cells here, not in the .ipynb files.
 """
 
@@ -941,6 +941,101 @@ if SCORES.exists():
     ]
 
 
+# ---- RQ2 label scoring with further models: shared cells -------------------------------
+
+SCORE_CLIPS = [
+    md("## Clips"),
+    code(r"""
+manifest = pd.read_csv(DATA_DIR / "manifest.csv", dtype={"video_id": str, "clip_id": str})
+clips = manifest[manifest["status"] == "ok"].reset_index(drop=True)
+if LIMIT:
+    clips = pd.concat([clips[clips["mode"] == "test"].head(LIMIT), clips[clips["mode"] != "test"].head(LIMIT)])
+print(len(clips), "clips to score")
+"""),
+]
+
+
+def score_cells(run_dir, run_score):
+    """Resume, run and progress cells of a label-scoring notebook; `run_score(row, condition)` is model-specific."""
+    return [
+        md(r"""
+## Resume
+
+Records are keyed by (model, uid, condition, task). Earlier records found under `/kaggle/input` or in
+`OUT_DIR` are copied into this run's output and skipped below.
+"""),
+        code(r"""
+SCORES = OUT_DIR / "scores.jsonl"
+
+
+def key(rec):
+    return (rec["model"], rec["uid"], rec["condition"], rec["task"])
+
+
+sources = sorted(set(glob.glob("/kaggle/input/**/{run_dir}/scores.jsonl", recursive=True)) | ({str(SCORES)} if SCORES.exists() else set()))
+records = {}
+for src in sources:
+    for line in open(src, encoding="utf-8"):
+        if line.strip() and "error" not in (rec := json.loads(line)):
+            records[key(rec)] = rec
+with open(SCORES, "w", encoding="utf-8") as f:
+    for rec in records.values():
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+done = set(records)
+print(f"{len(records)} finished records from {len(sources)} file(s)")
+
+
+def out_of_time():
+    return (time.time() - T_START) / 3600 > TIME_BUDGET_H
+""".replace("{run_dir}", run_dir)),
+        md(r"""
+## Run
+
+All clips under T+A+V first, then T, A and V, so a run cut short still has the main condition complete.
+A clip that fails (for example out of memory) is saved with an `error` field and retried on the next run.
+"""),
+        code(run_score.strip("\n") + "\n\n" + r"""
+jobs = [(row, c) for c in CONDITIONS for _, row in clips.iterrows()]
+todo = [j for j in jobs if (MODEL_ID, j[0]["uid"], j[1], "score") not in done]
+print(f"{len(jobs)} items, {len(jobs) - len(todo)} already done, {len(todo)} to run")
+
+n_done, stopped_early, t_run = 0, False, time.time()
+for row, condition in todo:
+    if out_of_time():
+        stopped_early = True
+        break
+    try:
+        rec = run_score(row, condition)
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        rec = {"model": MODEL_ID, "uid": row["uid"], "condition": condition, "task": "score", "error": "oom"}
+    with open(SCORES, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    n_done += 1
+    if n_done in (20, 100) or n_done % 500 == 0:
+        sec = (time.time() - t_run) / n_done
+        peak = max([torch.cuda.max_memory_allocated(d) / 2**30 for d in range(torch.cuda.device_count())] or [0])
+        print(f"{n_done}/{len(todo)} | {sec:.2f} s/item, about {(len(todo) - n_done) * sec / 3600:.1f} h left | "
+              f"peak {peak:.1f} GiB | last: {condition}")
+
+print(f"finished {n_done} items this run", "(stopped at the time budget: commit again to continue)" if stopped_early else "")
+"""),
+        md("## Progress and quick checks"),
+        code(r"""
+s = pd.DataFrame([json.loads(l) for l in open(SCORES, encoding="utf-8") if l.strip()])
+ok = s[s.get("error", pd.Series(index=s.index, dtype=object)).isna()] if len(s) else s
+print(f"{len(ok)} / {len(clips) * len(CONDITIONS)} items done |", "OOM:", int((s.get("error") == "oom").sum()) if "error" in s else 0)
+if len(ok):
+    p = np.exp(ok[[f"logit_{l}" for l in LABELS]].to_numpy() - ok[["lse"]].to_numpy())
+    ok = ok.assign(label_mass=p.sum(1), pred=np.array(LABELS)[p.argmax(1)]).merge(clips[["uid", "ds_label"]], on="uid")
+    print(ok.groupby("condition").agg(n=("uid", "size"), label_mass=("label_mass", "mean"),
+                                      accuracy=("pred", lambda x: (x == ok.loc[x.index, "ds_label"]).mean()),
+                                      nonfinite=("finite", lambda x: int((~x.astype(bool)).sum())),
+                                      gpu_s=("gpu_s", "mean"), prep_s=("prep_s", "mean")).round(3).to_string())
+"""),
+    ]
+
+
 # ---- second model: MiniCPM-o 2.6, label scoring only ------------------------------------
 
 MINICPM = [
@@ -1009,14 +1104,7 @@ if DATA_DIR is None:
 DATA_DIR = Path(DATA_DIR)
 DRY_RUN = False
 """ + COMMON_REPORT),
-    md("## Clips"),
-    code(r"""
-manifest = pd.read_csv(DATA_DIR / "manifest.csv", dtype={"video_id": str, "clip_id": str})
-clips = manifest[manifest["status"] == "ok"].reset_index(drop=True)
-if LIMIT:
-    clips = pd.concat([clips[clips["mode"] == "test"].head(LIMIT), clips[clips["mode"] != "test"].head(LIMIT)])
-print(len(clips), "clips to score")
-"""),
+    *SCORE_CLIPS,
     md(r"""
 ## Load the model
 
@@ -1125,43 +1213,7 @@ def label_logits(inputs):
     emb = model.get_omni_embedding(inputs, input_embeddings=emb, chunk_length=model.config.audio_chunk_length)
     return model.llm(inputs_embeds=emb, attention_mask=inputs["attention_mask"], use_cache=False).logits[0, -1].float()
 """),
-    md(r"""
-## Resume
-
-Records are keyed by (model, uid, condition, task). Earlier records found under `/kaggle/input` or in
-`OUT_DIR` are copied into this run's output and skipped below.
-"""),
-    code(r"""
-SCORES = OUT_DIR / "scores.jsonl"
-
-
-def key(rec):
-    return (rec["model"], rec["uid"], rec["condition"], rec["task"])
-
-
-sources = sorted(set(glob.glob("/kaggle/input/**/minicpm_runs/scores.jsonl", recursive=True)) | ({str(SCORES)} if SCORES.exists() else set()))
-records = {}
-for src in sources:
-    for line in open(src, encoding="utf-8"):
-        if line.strip() and "error" not in (rec := json.loads(line)):
-            records[key(rec)] = rec
-with open(SCORES, "w", encoding="utf-8") as f:
-    for rec in records.values():
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-done = set(records)
-print(f"{len(records)} finished records from {len(sources)} file(s)")
-
-
-def out_of_time():
-    return (time.time() - T_START) / 3600 > TIME_BUDGET_H
-"""),
-    md(r"""
-## Run
-
-All clips under T+A+V first, then T, A and V, so a run cut short still has the main condition complete.
-A clip that fails (for example out of memory) is saved with an `error` field and retried on the next run.
-"""),
-    code(r"""
+    *score_cells("minicpm_runs", r"""
 def run_score(row, condition):
     t0 = time.perf_counter()
     inputs = prepare(build_messages(row, condition), omni=condition == "TAV")
@@ -1173,45 +1225,216 @@ def run_score(row, condition):
            "lse": float(torch.logsumexp(logits, dim=-1))}
     rec.update({f"logit_{l}": float(v) for l, v in zip(LABELS, logits[label_first_ids].tolist())})
     return rec
-
-
-jobs = [(row, c) for c in CONDITIONS for _, row in clips.iterrows()]
-todo = [j for j in jobs if (MODEL_ID, j[0]["uid"], j[1], "score") not in done]
-print(f"{len(jobs)} items, {len(jobs) - len(todo)} already done, {len(todo)} to run")
-
-n_done, stopped_early, t_run = 0, False, time.time()
-for row, condition in todo:
-    if out_of_time():
-        stopped_early = True
-        break
-    try:
-        rec = run_score(row, condition)
-    except torch.cuda.OutOfMemoryError:
-        torch.cuda.empty_cache()
-        rec = {"model": MODEL_ID, "uid": row["uid"], "condition": condition, "task": "score", "error": "oom"}
-    with open(SCORES, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    n_done += 1
-    if n_done in (20, 100) or n_done % 500 == 0:
-        sec = (time.time() - t_run) / n_done
-        peak = max([torch.cuda.max_memory_allocated(d) / 2**30 for d in range(torch.cuda.device_count())] or [0])
-        print(f"{n_done}/{len(todo)} | {sec:.2f} s/item, about {(len(todo) - n_done) * sec / 3600:.1f} h left | "
-              f"peak {peak:.1f} GiB | last: {condition}")
-
-print(f"finished {n_done} items this run", "(stopped at the time budget: commit again to continue)" if stopped_early else "")
 """),
-    md("## Progress and quick checks"),
+
+]
+
+
+# ---- third model: Gemma 4 E4B-it, label scoring only ------------------------------------
+
+GEMMA4 = [
+    md(r"""
+# RQ2, third model: Gemma 4 E4B-it on CH-SIMS v2 (Kaggle, T4)
+
+Repeats the label scoring of the Qwen2.5-Omni-7B and MiniCPM-o 2.6 runs with a model from a third family
+(Google): all 4,403 clips × 4 conditions (T+A+V, T, A, V), the same question and the same record format
+(logits of the 7 labels' first tokens + log-sum-exp), written to `/kaggle/working/gemma4_runs/scores.jsonl`.
+
+How the inputs follow the model card:
+- The frames go in as one video (all extracted frames, with their real timestamps), **before** the text;
+  the audio goes **after** the text, as the card recommends. 70 visual tokens per frame (the processor default for video).
+- No system prompt; thinking is off (`enable_thinking=False`), so the answer starts right after `<|turn>model`.
+- Audio longer than 30 s is cut at 30 s by the processor (the model's limit).
+
+**Precision.** T4 has no bf16, and the checkpoint is bf16. The language model runs in fp16 and the vision and
+audio encoders in fp32. Every record stores `max_abs_act`, the largest activation seen in the language model
+for that item: fp16 overflows at 65,504, so the quick check at the end flags any item that comes close.
+
+**Memory.** Everything sits on GPU 0 (about 11.5 GiB) except the per-layer embedding table (2.8 B parameters,
+a lookup only), which stays in CPU memory.
+
+**Versions.** transformers 5.20.1, as for Qwen. In 5.19 and 5.20 `Gemma4ForConditionalGeneration.forward`
+does not pass `num_frames_per_video` on to the video encoder, so `label_logits` runs the video encoder itself
+and hands its output to the model. This was checked locally on a small random-weight copy: the logits match
+transformers 5.18.0 (where the plain call still works) exactly for all four conditions.
+
+**Running it**
+1. *Accelerator*: **GPU T4 x2** (only one is used); *Internet*: **on**; *Add input*: the preprocessed `chsims-mm` dataset.
+2. First set `LIMIT = 10` and run all interactively: check the load report, the `label mass`, the activation check
+   and the timing lines, and send them over before the full run.
+3. Full run: `LIMIT = None`, **Save Version → Save & Run All (Commit)**. It stops after `TIME_BUDGET_H`;
+   to continue, add this notebook's output as an input and commit again.
+"""),
     code(r"""
-s = pd.DataFrame([json.loads(l) for l in open(SCORES, encoding="utf-8") if l.strip()])
-ok = s[s.get("error", pd.Series(index=s.index, dtype=object)).isna()] if len(s) else s
-print(f"{len(ok)} / {len(clips) * len(CONDITIONS)} items done |", "OOM:", int((s.get("error") == "oom").sum()) if "error" in s else 0)
+# transformers 5.20.1: the version of the Qwen run; Gemma 4 needs >= 5.5.
+%pip install -q "transformers==5.20.1" accelerate librosa soundfile
+"""),
+    code(r"""
+import glob
+import json
+import os
+import shutil
+import time
+from pathlib import Path
+
+import librosa
+import numpy as np
+import pandas as pd
+import torch
+from PIL import Image
+
+MODEL_ID = os.environ.get("MODEL_ID", "google/gemma-4-E4B-it")  # env override: local tests with a tiny model
+TIME_BUDGET_H = 11.0         # stop starting new items after this many hours
+LIMIT = None                 # e.g. 10 for a quick check: 10 test clips + 10 other clips
+SR = 16000
+OUT_DIR = Path(os.environ.get("OUT_DIR", "/kaggle/working/gemma4_runs"))
+T_START = time.time()
+
+DATA_DIR = os.environ.get("CHSIMS_MM_DIR")
+if DATA_DIR is None:
+    hits = glob.glob("/kaggle/input/**/manifest.csv", recursive=True)
+    assert hits, "No manifest.csv under /kaggle/input: attach the preprocessed dataset."
+    DATA_DIR = os.path.dirname(hits[0])
+DATA_DIR = Path(DATA_DIR)
+DRY_RUN = False
+""" + COMMON_REPORT),
+    *SCORE_CLIPS,
+    md(r"""
+## Load the model
+
+Language model in fp16, vision and audio encoders in fp32. All on GPU 0 except the per-layer embedding
+table, which stays on the CPU: hooks move the token ids to it and its output back to the GPU.
+Forward hooks record the largest activation of every decoder layer (before its output scale) and of every
+MLP's inner layer.
+"""),
+    code(r"""
+from transformers import AutoModelForMultimodalLM, AutoProcessor
+from transformers.video_utils import VideoMetadata
+
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+LLM_DTYPE = torch.float16 if DEVICE != "cpu" else torch.float32
+ENCODERS = ("vision_tower", "embed_vision", "audio_tower", "embed_audio")
+PLE = "model.language_model.embed_tokens_per_layer"
+
+t0 = time.time()
+processor = AutoProcessor.from_pretrained(MODEL_ID)
+tokenizer = processor.tokenizer
+model = AutoModelForMultimodalLM.from_pretrained(MODEL_ID, dtype=LLM_DTYPE).eval()  # default: sdpa where supported
+for name in ENCODERS:
+    getattr(model.model, name).float()
+ENC_DTYPE = model.model.audio_tower.dtype
+for name, p in model.named_parameters():  # tied weights (lm_head = embed_tokens) are listed once
+    if not name.startswith(PLE):
+        p.data = p.data.to(DEVICE)
+for name, module in model.named_modules():
+    if not name.startswith(PLE):
+        for b, buf in list(module.named_buffers(recurse=False)):
+            module._buffers[b] = buf.to(DEVICE)
+ple = model.get_submodule(PLE)
+ple.register_forward_pre_hook(lambda m, args: (args[0].to(ple.weight.device),))
+ple.register_forward_hook(lambda m, args, out: out.to(DEVICE))
+
+ACT = {"max": 0.0}
+
+
+def track(x):
+    ACT["max"] = max(ACT["max"], float(x.detach().abs().amax()))
+
+
+for layer in model.model.language_model.layers:
+    layer.register_forward_hook(lambda m, args, out: track(out / m.layer_scalar.abs().clamp(min=1e-6)))
+    layer.mlp.down_proj.register_forward_pre_hook(lambda m, args: track(args[0]))
+
+print(f"loaded in {time.time() - t0:.0f} s | language model {LLM_DTYPE}, encoders {ENC_DTYPE} | attention:",
+      {n: getattr(model.config, n)._attn_implementation for n in ("text_config", "vision_config", "audio_config")})
+print("layer output scales:", np.round([float(l.layer_scalar) for l in model.model.language_model.layers], 3).tolist())
+for i in range(torch.cuda.device_count()):
+    print(f"cuda:{i} allocated after load: {torch.cuda.memory_allocated(i) / 2**30:.1f} GiB")
+"""),
+    md(r"""
+## Prompts and label scoring
+
+Same wording as the Qwen and MiniCPM runs. The chat template places `<|video|>` and `<|audio|>` where the
+content items are; the processor expands them (frames are labelled `mm:ss`).
+"""),
+    code(r"""
+LABELS = ["Anger", "Disgust", "Fear", "Joy", "Neutral", "Sadness", "Surprise"]
+DESCRIBE = {
+    "TAV": "the video frames, the audio track and the transcript",
+    "T": "only the transcript",
+    "A": "only the audio track",
+    "V": "only the video frames, without sound",
+}
+CONDITIONS = list(DESCRIBE)
+ASK = f"Which emotion does the speaker express? Choose exactly one of: {', '.join(LABELS)}.\nAnswer with the label only."
+label_first_ids = [tokenizer.encode(l, add_special_tokens=False)[0] for l in LABELS]
+assert len(set(label_first_ids)) == len(LABELS), "two labels share a first token"
+
+
+def prepare(row, condition):
+    content, kwargs = [], {}
+    if "V" in condition:
+        frames = sorted(glob.glob(str(DATA_DIR / row["frames_dir"] / "*.jpg")))
+        kwargs["videos"] = [np.stack([np.asarray(Image.open(f).convert("RGB")) for f in frames])]
+        kwargs["video_metadata"] = [VideoMetadata(total_num_frames=len(frames), fps=float(row["sample_fps"]),
+                                                  frames_indices=list(range(len(frames))))]
+        kwargs["do_sample_frames"] = False  # frames were already sampled by preprocess_chsims.py
+        content.append({"type": "video"})
+    text = f"You are given {DESCRIBE[condition]} of a speaker in a scene from a Chinese film or TV series.\n"
+    if "T" in condition:
+        text += f"Transcript: {row['text']}\n"
+    content.append({"type": "text", "text": text + ASK})
+    if "A" in condition:
+        kwargs["audio"] = [librosa.load(str(DATA_DIR / row["audio_path"]), sr=SR, mono=True)[0]]
+        content.append({"type": "audio"})
+    prompt = processor.apply_chat_template([{"role": "user", "content": content}], tokenize=False,
+                                           add_generation_prompt=True, enable_thinking=False)
+    inputs = processor(text=prompt, return_tensors="pt", **kwargs)
+    return {k: v.to(DEVICE, dtype=ENC_DTYPE) if torch.is_floating_point(v) else v.to(DEVICE) for k, v in inputs.items()}
+
+
+@torch.inference_mode()
+def label_logits(inputs):
+    inputs = dict(inputs)
+    if "pixel_values_videos" in inputs:
+        # transformers 5.19-5.20 does not pass num_frames_per_video on to the video encoder: run it here
+        video = model.model.get_video_features(inputs.pop("pixel_values_videos"), inputs.pop("video_position_ids"),
+                                               inputs.pop("num_frames_per_video"), return_dict=True)
+        inputs["mm_encoder_outputs"] = {"video": video}
+    return model(**inputs, use_cache=False, logits_to_keep=1).logits[0, -1].float()
+
+
+inputs = prepare(clips.iloc[0], "TAV")
+shown = tokenizer.decode(inputs["input_ids"][0])
+for t in ("<|video|>", "<|audio|>"):
+    shown = shown.replace(t, "")
+print(inputs["input_ids"].shape[1], "tokens; prompt without the placeholder tokens:\n", shown)
+"""),
+    *score_cells("gemma4_runs", r"""
+def run_score(row, condition):
+    t0 = time.perf_counter()
+    inputs = prepare(row, condition)
+    t1 = time.perf_counter()
+    ACT["max"] = 0.0
+    logits = label_logits(inputs)
+    rec = {"model": MODEL_ID, "uid": row["uid"], "condition": condition, "task": "score",
+           "n_tokens": int(inputs["input_ids"].shape[1]), "prep_s": round(t1 - t0, 3),
+           "gpu_s": round(time.perf_counter() - t1, 3), "finite": bool(torch.isfinite(logits).all()),
+           "max_abs_act": ACT["max"], "lse": float(torch.logsumexp(logits, dim=-1))}
+    rec.update({f"logit_{l}": float(v) for l, v in zip(LABELS, logits[label_first_ids].tolist())})
+    return rec
+"""),
+    md(r"""
+## fp16 check
+
+fp16 overflows above 65,504. Items whose largest activation passes 30,000 are too close: if there are
+any, do not start the full run.
+"""),
+    code(r"""
 if len(ok):
-    p = np.exp(ok[[f"logit_{l}" for l in LABELS]].to_numpy() - ok[["lse"]].to_numpy())
-    ok = ok.assign(label_mass=p.sum(1), pred=np.array(LABELS)[p.argmax(1)]).merge(clips[["uid", "ds_label"]], on="uid")
-    print(ok.groupby("condition").agg(n=("uid", "size"), label_mass=("label_mass", "mean"),
-                                      accuracy=("pred", lambda x: (x == ok.loc[x.index, "ds_label"]).mean()),
-                                      nonfinite=("finite", lambda x: int((~x.astype(bool)).sum())),
-                                      gpu_s=("gpu_s", "mean"), prep_s=("prep_s", "mean")).round(3).to_string())
+    print(ok.groupby("condition")["max_abs_act"].describe(percentiles=[0.5, 0.99]).round(1).to_string())
+    near = ok[(ok["max_abs_act"] > 30000) | ~ok["finite"].astype(bool)]
+    print(f"items near fp16 overflow or not finite: {len(near)}")
 """),
 ]
 
@@ -1220,5 +1443,6 @@ if __name__ == "__main__":
     write(HERE / "benchmark_qwen25_omni.ipynb", BENCHMARK)
     write(HERE / "run_qwen25_omni.ipynb", RUN)
     write(HERE / "run_minicpm_o.ipynb", MINICPM)
+    write(HERE / "run_gemma4.ipynb", GEMMA4)
     for arm in ("hard", "soft"):
         write(HERE / f"rq3_lora_{arm}.ipynb", rq3_cells(arm))
