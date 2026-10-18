@@ -1,9 +1,10 @@
-"""RQ2 across models: Qwen2.5-Omni-7B vs MiniCPM-o 2.6, zero-shot, all 4,403 clips.
+"""RQ2 across models: Qwen2.5-Omni-7B and the other model families, zero-shot, all 4,403 clips.
 
 For each model and input condition: the entropy change on conflict clips (model vs humans), the
 clip-level alignment of model entropy with human disagreement, distance to the human distribution
-and the Neutral share. Paired differences between the two models use the same video-level bootstrap
-resamples, so their intervals account for the clips being shared.
+and the Neutral share. Paired differences (each model minus Qwen2.5-Omni-7B, and each model's entropy
+shift minus the human one) use the same video-level bootstrap resamples, so their intervals account
+for the clips being shared. Models whose score file is missing are skipped.
 
 Usage (from the repository root):
     python analysis/rq2_compare_models.py --out results/rq2_compare_models
@@ -20,7 +21,13 @@ import pandas as pd
 from rq3_analysis import N_BOOT, Bootstrap, softmax, load_logits
 from rq_analysis import CONDITIONS, LABELS, auroc, ent_ce, entropy, jsd, load_humans, markdown, spearman, tvd
 
-RUNS = {"Qwen2.5-Omni-7B": "results/omni_runs/scores.jsonl", "MiniCPM-o 2.6": "results/minicpm_runs/scores.jsonl"}
+ALL_RUNS = {  # the first one is the reference for the paired differences
+    "Qwen2.5-Omni-7B": "results/omni_runs/scores.jsonl",
+    "MiniCPM-o 2.6": "results/minicpm_runs/scores.jsonl",
+    "Gemma 4 E4B-it": "results/gemma4_runs/scores.jsonl",
+    "Phi-4-multimodal": "results/phi4mm_runs/scores.jsonl",
+}
+RUNS = {name: path for name, path in ALL_RUNS.items() if Path(path).exists()}
 
 
 def main() -> None:
@@ -68,12 +75,13 @@ def main() -> None:
                          "mean entropy": entropy(P).mean(), "mean EntCE (signed)": ent_ce(P, H).mean()})
     tables["rq2_models_by_condition"] = pd.DataFrame(rows)
 
-    a, b = RUNS
+    ref, *others = RUNS
     rows = []
-    for c in CONDITIONS:
-        sa, sb = stats(dist[b][c]), stats(dist[a][c])
-        rows.append({"condition": c, "comparison": f"{b} minus {a}",
-                     **{k: boot(lambda i, k=k: sa[k](i) - sb[k](i)) for k in sa}})
+    for b in others:
+        for c in CONDITIONS:
+            sa, sb = stats(dist[b][c]), stats(dist[ref][c])
+            rows.append({"condition": c, "comparison": f"{b} minus {ref}",
+                         **{k: boot(lambda i, k=k: sa[k](i) - sb[k](i)) for k in sa}})
     for name in RUNS:  # how close is each model's entropy shift to the human shift (T+A+V)?
         s = stats(dist[name]["TAV"])
         rows.append({"condition": "TAV", "comparison": f"{name} minus humans",
