@@ -18,6 +18,7 @@ CH-SIMS v2(s) clips re-annotated in EmoS.
 | `../kaggle/run_minicpm_o.ipynb` | RQ2 with a second model: MiniCPM-o 2.6 label scoring, all clips × 4 conditions, same record format; resumable |
 | `../kaggle/run_gemma4.ipynb` | RQ2 with a third family: Gemma 4 E4B-it label scoring, same design; records the largest activation per item (fp16 check) |
 | `../kaggle/run_phi4mm.ipynb` | RQ2 with a fourth family: Phi-4-multimodal-instruct label scoring, same design; the model's own LoRA switching by input type |
+| `../kaggle/run_emotion_llama.ipynb` | RQ2 with an emotion specialist: Emotion-LLaMA (Llama-2) with the authors' code in its own Python 3.9 environment; six labels (no Disgust, worried read as Fear); runs `../kaggle/score_emotion_llama.py` |
 | `../kaggle/build_notebooks.py` | Builds all Kaggle notebooks from shared cells: edit cells there, then run it |
 
 Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH` for preprocessing; `scipy` and `statsmodels` for `rq1_models.py`.
@@ -50,6 +51,8 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
 9. **Further families**: `kaggle/run_gemma4.ipynb` (transformers 5.20.1) and `kaggle/run_phi4mm.ipynb` (transformers 4.48.2, peft 0.13.2),
    each first with `LIMIT = 10` (check the fp16 activation table), then the full run. Copy the results to
    `results/gemma4_runs/` and `results/phi4mm_runs/`, run `rq_analysis.py` on each, then `rq2_compare_models.py`.
+   `kaggle/run_emotion_llama.ipynb` the same way (results in `emollama_runs/`); its records have no Disgust logit,
+   so its comparison with humans is on six labels (analysis support to be added with the results).
 
 ## Note on clip ids
 
