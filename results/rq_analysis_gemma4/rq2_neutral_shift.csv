@@ -1,0 +1,3 @@
+clips,n,humans: majority label is Neutral,humans: share of Neutral votes,model T+A+V: predicts Neutral
+no conflict,2427,0.173053152039555,0.17126768301057546,0.25793160280181293
+conflict,1976,0.40941295546558704,0.3621794871794872,0.46558704453441296

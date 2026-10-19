@@ -52,7 +52,7 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
    each first with `LIMIT = 10` (check the fp16 activation table), then the full run. Copy the results to
    `results/gemma4_runs/` and `results/phi4mm_runs/`, run `rq_analysis.py` on each, then `rq2_compare_models.py`.
    `kaggle/run_emotion_llama.ipynb` the same way (results in `emollama_runs/`); its records have no Disgust logit,
-   so its comparison with humans is on six labels (analysis support to be added with the results).
+   so it appears only in the six-label tables of `rq2_compare_models.py` (Disgust removed from every model and the humans).
 
 ## Note on clip ids
 
