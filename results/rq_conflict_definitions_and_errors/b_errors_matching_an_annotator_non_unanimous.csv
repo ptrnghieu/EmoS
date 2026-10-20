@@ -1,0 +1,8 @@
+model (T+A+V),clips,"errors, no conflict","errors matching an annotator, no conflict","errors, conflict","errors matching an annotator, conflict",conflict minus no conflict
+Qwen2.5-Omni-7B,"all clips, annotators not unanimous",610,"0.572 [0.534, 0.612]",628,"0.626 [0.587, 0.664]","0.054 [-0.010, 0.109]"
+MiniCPM-o 2.6,"all clips, annotators not unanimous",705,"0.457 [0.419, 0.495]",739,"0.506 [0.460, 0.552]","0.049 [-0.011, 0.106]"
+Gemma 4 E4B-it,"all clips, annotators not unanimous",661,"0.531 [0.487, 0.577]",683,"0.603 [0.564, 0.641]","0.072 [0.013, 0.128]"
+Emotion-LLaMA,"all clips, annotators not unanimous",695,"0.459 [0.417, 0.500]",866,"0.445 [0.402, 0.487]","-0.014 [-0.075, 0.044]"
+Qwen2.5-Omni-7B zero-shot (test split),"test split, annotators not unanimous",173,"0.526 [0.438, 0.611]",132,"0.598 [0.512, 0.679]","0.072 [-0.056, 0.198]"
+LoRA hard (seed 0),"test split, annotators not unanimous",171,"0.620 [0.549, 0.683]",128,"0.586 [0.508, 0.664]","-0.034 [-0.133, 0.067]"
+LoRA soft (seed 0),"test split, annotators not unanimous",166,"0.639 [0.561, 0.709]",129,"0.612 [0.539, 0.697]","-0.026 [-0.123, 0.080]"

@@ -1,0 +1,5 @@
+conflict measure,"clips flagged, or mean",OR for more disagreement [95% CI],p
+ours: per-modality polarities differ,1976 clips,"1.64 [1.44, 1.87]",1.3317557740979845e-13
+"Du, hard: a modality's polarity differs from the multimodal label",2038 clips,"1.70 [1.49, 1.94]",8.616071243925736e-15
+"Du, count: modalities differing from the multimodal label (per modality)",mean 0.66,"1.37 [1.26, 1.49]",1.6464561483050108e-13
+"Du, distance: mean |label_m - label| (per SD)",mean 1.27,"1.40 [1.32, 1.49]",6.674811765676783e-27
