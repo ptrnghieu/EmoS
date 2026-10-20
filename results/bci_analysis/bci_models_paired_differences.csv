@@ -1,0 +1,13 @@
+model,comparison,JSD to humans,"Spearman(entropy, human entropy)",AUROC: entropy flags disagreement,entropy change on conflict
+Qwen2.5-Omni-7B,causal inference minus TAV + temperature,"-0.001 [-0.001, -0.000]","0.001 [-0.006, 0.008]","0.002 [-0.002, 0.006]","0.005 [-0.001, 0.011]"
+Qwen2.5-Omni-7B,causal inference minus fixed mixture,"0.002 [0.000, 0.004]","-0.029 [-0.056, -0.006]","-0.007 [-0.022, 0.006]","-0.037 [-0.058, -0.020]"
+Qwen2.5-Omni-7B,"causal inference, oracle conflict minus TAV + temperature","-0.003 [-0.006, -0.000]","0.038 [0.005, 0.074]","0.011 [-0.007, 0.030]","0.184 [0.159, 0.207]"
+MiniCPM-o 2.6,causal inference minus TAV + temperature,"-0.004 [-0.007, -0.001]","-0.009 [-0.034, 0.015]","-0.006 [-0.022, 0.010]","-0.004 [-0.027, 0.017]"
+MiniCPM-o 2.6,causal inference minus fixed mixture,"0.000 [-0.000, 0.001]","0.001 [-0.008, 0.009]","0.001 [-0.005, 0.006]","0.002 [-0.006, 0.008]"
+MiniCPM-o 2.6,"causal inference, oracle conflict minus TAV + temperature","-0.005 [-0.008, -0.002]","-0.014 [-0.037, 0.008]","-0.008 [-0.023, 0.006]","-0.020 [-0.038, -0.002]"
+Gemma 4 E4B-it,causal inference minus TAV + temperature,"-0.005 [-0.008, -0.001]","0.002 [-0.021, 0.029]","-0.002 [-0.015, 0.013]","0.030 [0.007, 0.052]"
+Gemma 4 E4B-it,causal inference minus fixed mixture,"-0.000 [-0.000, 0.000]","0.001 [-0.001, 0.002]","0.000 [-0.000, 0.001]","0.000 [-0.001, 0.001]"
+Gemma 4 E4B-it,"causal inference, oracle conflict minus TAV + temperature","-0.001 [-0.007, 0.005]","-0.005 [-0.033, 0.027]","-0.005 [-0.020, 0.013]","0.033 [0.007, 0.055]"
+Emotion-LLaMA,causal inference minus TAV + temperature,"0.001 [-0.005, 0.006]","-0.032 [-0.078, 0.015]","-0.024 [-0.050, 0.003]","-0.052 [-0.094, -0.012]"
+Emotion-LLaMA,causal inference minus fixed mixture,"-0.000 [-0.001, 0.000]","-0.002 [-0.008, 0.003]","-0.001 [-0.005, 0.002]","0.005 [0.001, 0.008]"
+Emotion-LLaMA,"causal inference, oracle conflict minus TAV + temperature","-0.001 [-0.008, 0.004]","-0.017 [-0.066, 0.034]","-0.014 [-0.041, 0.014]","0.030 [-0.016, 0.076]"

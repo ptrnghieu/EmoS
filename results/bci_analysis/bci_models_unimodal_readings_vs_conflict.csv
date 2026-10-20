@@ -1,0 +1,5 @@
+model,AUROC: T/A/V readings disagree on polarity-conflict clips,Spearman with the T/A/V label spread,Spearman with human entropy
+Qwen2.5-Omni-7B,0.507,0.155,0.023
+MiniCPM-o 2.6,0.495,0.088,-0.001
+Gemma 4 E4B-it,0.522,0.129,0.105
+Emotion-LLaMA,0.472,-0.004,0.079

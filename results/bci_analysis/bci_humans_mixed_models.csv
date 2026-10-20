@@ -1,0 +1,11 @@
+model,term,OR for more disagreement [95% CI],p
+spread bins (reference 0.0),spread 0.2,"1.46 [1.19, 1.78]",0.00021076424931554993
+spread bins (reference 0.0),spread 0.4,"1.62 [1.32, 1.99]",5.151838636723227e-06
+spread bins (reference 0.0),spread 0.6,"2.03 [1.65, 2.50]",2.7303006764102652e-11
+spread bins (reference 0.0),spread 0.8,"2.24 [1.78, 2.82]",8.638401859510736e-12
+spread bins (reference 0.0),spread 1.0,"1.96 [1.50, 2.57]",8.159572855356925e-07
+spread bins (reference 0.0),spread 1.2-1.4,"2.71 [1.97, 3.73]",1.0401416250513563e-09
+spread bins (reference 0.0),spread 1.6-2.0,"1.85 [1.26, 2.71]",0.001662547522424314
+spread + spread^2,spread,"3.88 [2.64, 5.71]",5.4809155029043025e-12
+spread + spread^2,spread^2,"0.56 [0.44, 0.73]",8.87851627011496e-06
+spread + spread^2,spread at the peak (-b1 / 2 b2),1.19,
