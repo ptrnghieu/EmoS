@@ -20,6 +20,7 @@ CH-SIMS v2(s) clips re-annotated in EmoS.
 | `../kaggle/run_minicpm_o.ipynb` | RQ2 with a second model: MiniCPM-o 2.6 label scoring, all clips × 4 conditions, same record format; resumable |
 | `../kaggle/run_gemma4.ipynb` | RQ2 with a third family: Gemma 4 E4B-it label scoring, same design; records the largest activation per item (fp16 check) |
 | `../kaggle/run_phi4mm.ipynb` | RQ2 with a fourth family: Phi-4-multimodal-instruct label scoring, same design; the model's own LoRA switching by input type |
+| `../kaggle/rq4_ci_{B,C,D}.ipynb` | RQ4, causal-inference fusion (fine-tuned): four readings per clip (T+A+V, T, A, V), per-modality polarity heads, and B: heads only, C: fixed mixture, D: per-clip common-cause gate; variant A is the RQ3 soft arm |
 | `../kaggle/run_emotion_llama.ipynb` | RQ2 with an emotion specialist: Emotion-LLaMA (Llama-2) with the authors' code in its own Python 3.9 environment; six labels (no Disgust, worried read as Fear); runs `../kaggle/score_emotion_llama.py` |
 | `../kaggle/build_notebooks.py` | Builds all Kaggle notebooks from shared cells: edit cells there, then run it |
 

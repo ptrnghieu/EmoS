@@ -7,6 +7,7 @@ kaggle/rq3_lora_{hard,soft}.ipynb (RQ3 fine-tuning, one notebook per arm), and t
 with further model families: kaggle/run_minicpm_o.ipynb (MiniCPM-o 2.6), kaggle/run_gemma4.ipynb (Gemma 4 E4B-it),
 kaggle/run_phi4mm.ipynb (Phi-4-multimodal-instruct), kaggle/run_emotion_llama.ipynb (Emotion-LLaMA,
 which runs kaggle/score_emotion_llama.py in its own Python 3.9 environment).
+RQ4 (causal-inference fusion, fine-tuned): kaggle/rq4_ci_{B,C,D}.ipynb, one notebook per variant.
 Edit the cells here, not in the .ipynb files.
 """
 
@@ -1818,6 +1819,461 @@ if len(ok):
 ]
 
 
+# ---- RQ4: causal-inference fusion (fine-tuned), one notebook per variant -------------------
+
+CI_TEXT = {
+    "B": "**B, unimodal heads only**: the RQ3 soft-label loss on the T+A+V answer, plus a head per modality that "
+         "predicts that modality's polarity (CH-SIMS v2 per-modality labels). No fusion.",
+    "C": "**C, fixed mixture**: B plus fusion of the T+A+V answer with the T, A, V answers, with one learned weight "
+         "for the fused reading that is the same for every clip.",
+    "D": "**D, causal inference**: C, but the weight of the fused reading (the probability of a common cause) is "
+         "inferred per clip from the per-modality polarity heads and the model's state.",
+}
+
+
+def rq4_cells(variant):
+    return [
+        md(rf"""
+# RQ4: causal-inference fusion on Qwen2.5-Omni-7B, variant {variant} (Kaggle, 2× T4)
+
+Inspired by Bayesian causal inference in multisensory perception (Körding et al., 2007): an observer infers
+whether the cues share a cause and fuses them only then. Per clip the model reads the clip four times, under
+T+A+V, T, A and V (one LoRA, shared). Heads on the last hidden state of the T, A and V readings predict each
+modality's polarity. The output is
+`Q = pi * P(T+A+V) + (1 - pi) * (w_T P(T) + w_A P(A) + w_V P(V))`,
+where `pi` is the weight of the fused reading. The loss is the cross-entropy between `Q` and the 3 annotators'
+vote distribution, plus `AUX_WEIGHT` times the cross-entropy of the polarity heads.
+
+This notebook trains {CI_TEXT[variant]}
+Variant A is the RQ3 soft-label arm (already run). The other variants are the same notebook with
+`VARIANT = "B"`, `"C"` or `"D"`.
+
+Same LoRA, prompt, splits, learning rate, epochs and checkpointing as RQ3; the heads (well under 1 M parameters)
+are trained in fp32 at `HEAD_LR`. Four readings per training clip make a run about twice as long as RQ3
+(estimate: about 12 GPU-hours to the end of training, so two sessions).
+
+**Running it**
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: the preprocessed `chsims-mm` dataset.
+2. First set `LIMIT = 10` and run all interactively; send the progress lines (speed, peak memory, OOM count).
+   Do **not** attach that run's output later.
+3. **Save Version → Save & Run All (Commit)**. When it stops at `TIME_BUDGET_H`, add this notebook's own output
+   as an input and commit again: training resumes from the last checkpoint, scoring skips finished clips.
+4. Results: `/kaggle/working/rq4_{variant}/` (or `rq4_{variant}_seed<N>/`) with `scores.jsonl`, `state.json` and the
+   best adapter and heads. `scores.jsonl` holds the four readings (`task = score`) and the fused output
+   (`task = fused`, logits = log Q) for the test and valid splits.
+
+**Seeds.** As in RQ3: `SEED = 0`, then `1` and `2`, each in its own committed version.
+"""),
+        code(r"""
+# peft added for LoRA; the rest as in the other notebooks.
+%pip install -q "transformers==5.20.1" "qwen-omni-utils==0.0.9" "peft==0.21.2" audioread librosa
+# Kaggle ships torchao 0.10; peft 0.21 raises an ImportError for torchao < 0.16 even when it is not used.
+%pip uninstall -y -q torchao
+"""),
+        code(COMMON_CONFIG + rf"""
+VARIANT = "{variant}"            # B: polarity heads only; C: + fixed mixture; D: + per-clip causal inference
+LORA_R, LORA_ALPHA, LORA_DROPOUT = 16, 32, 0.05
+LORA_TARGETS = r"^model\.layers\.\d+\.self_attn\.(q|k|v|o)_proj$"
+LR = 1e-4                      # LoRA, as in RQ3
+HEAD_LR = 1e-3                 # polarity heads and gate
+AUX_WEIGHT = 1.0               # weight of the per-modality polarity loss
+EPOCHS = 2
+GRAD_ACCUM = 8
+WARMUP = 0.03
+CKPT_EVERY = 200
+TRAIN_MAX_MEMORY = {{0: "10GiB", 1: "14GiB"}}
+TIME_BUDGET_H = 11.0
+LIMIT = None                   # e.g. 10 for a quick check: 10 clips per split
+SEED = int(os.environ.get("SEED", 0))
+SUFFIX = f"_seed{{SEED}}" if SEED else ""
+RUN_NAME = f"rq4_{{VARIANT}}{{SUFFIX}}"
+TAG = f"{{MODEL_ID}}+ci-{{VARIANT}}{{SUFFIX.replace('_', '-')}}"
+OUT_DIR = Path(os.environ.get("OUT_DIR", f"/kaggle/working/{{RUN_NAME}}"))
+READINGS = ("TAV", "T", "A", "V")
+T_START = time.time()
+assert VARIANT in ("B", "C", "D") and CKPT_EVERY % GRAD_ACCUM == 0
+""" + COMMON_REPORT),
+        md(r"""
+## Load the model, add LoRA and the heads
+
+As in RQ3, plus a hook that keeps the last hidden state (the input of the language-model head) for the heads.
+"""),
+        code(r"""
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict
+from qwen_omni_utils import process_mm_info
+from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniThinkerForConditionalGeneration
+
+ON_GPU = torch.cuda.is_available()
+processor = Qwen2_5OmniProcessor.from_pretrained(MODEL_ID)
+kwargs = dict(dtype=torch.float16 if ON_GPU else torch.float32, attn_implementation="sdpa")
+if ON_GPU:
+    kwargs.update(device_map="auto", max_memory=TRAIN_MAX_MEMORY)
+t0 = time.time()
+base = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(MODEL_ID, **kwargs)
+print(f"loaded in {time.time() - t0:.0f} s")
+base.config.use_cache = False
+base.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+HIDDEN = {}
+
+
+def keep_last(module, args):
+    HIDDEN["h"] = args[0][:, -1]
+    return (args[0][:, -1:],) + args[1:]
+
+
+base.lm_head.register_forward_pre_hook(keep_last)
+
+torch.manual_seed(SEED)
+model = get_peft_model(base, LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
+                                        target_modules=LORA_TARGETS, bias="none"))
+lora_params = [p for p in model.parameters() if p.requires_grad]
+HEAD_DEVICE = base.lm_head.weight.device
+
+
+class CIHeads(torch.nn.Module):
+    # polarity head per modality (negative / neutral / positive), gate for the fused reading, mixture weights
+    def __init__(self, d, n_labels):
+        super().__init__()
+        self.pol = torch.nn.ModuleDict({m: torch.nn.Linear(d, 3) for m in "TAV"})
+        self.proj = torch.nn.Linear(d, 16)
+        self.gate = torch.nn.Sequential(torch.nn.Linear(9 + 3 + 4 + 16, 32), torch.nn.GELU(), torch.nn.Linear(32, 1))
+        self.gate_const = torch.nn.Parameter(torch.zeros(1))   # variant C: one gate logit for every clip
+        self.mix = torch.nn.Parameter(torch.zeros(3))          # weights of the T, A, V readings
+
+
+heads = CIHeads(base.config.text_config.hidden_size if hasattr(base.config, "text_config") else base.config.hidden_size,
+                7).to(HEAD_DEVICE, torch.float32)
+print(f"LoRA trainable params: {sum(p.numel() for p in lora_params) / 1e6:.1f} M | heads: "
+      f"{sum(p.numel() for p in heads.parameters()) / 1e3:.0f} k on {HEAD_DEVICE}")
+for i in range(torch.cuda.device_count()):
+    print(f"cuda:{i} allocated after load: {torch.cuda.memory_allocated(i) / 2**30:.1f} GiB")
+"""),
+        md("## Prompts (same as the zero-shot run)"),
+        PROMPTS,
+        md(r"""
+## Clips and targets
+
+`human`: the 3 annotators' vote distribution (the target, as in the RQ3 soft arm). `polarity`: the class
+(negative, neutral, positive) of each modality's CH-SIMS v2 label, the target of the polarity heads.
+"""),
+        code(r"""
+manifest = pd.read_csv(DATA_DIR / "manifest.csv", dtype={"video_id": str, "clip_id": str})
+clips = manifest[manifest["status"] == "ok"].reset_index(drop=True)
+splits = {m: clips[clips["mode"] == m].reset_index(drop=True) for m in ("train", "valid", "test")}
+if LIMIT:
+    splits = {m: df.head(LIMIT) for m, df in splits.items()}
+for m, df in splits.items():
+    votes = df[["ann1", "ann2", "ann3"]].to_numpy()
+    df["human"] = list(np.stack([(votes == l).sum(axis=1) for l in LABELS], axis=1) / votes.shape[1])
+    for mod in "TAV":
+        df[f"pol_{mod}"] = (np.sign(df[f"label_{mod}"]).astype(int) + 1).to_numpy()  # 0 negative, 1 neutral, 2 positive
+    print(f"{m:5s} {len(df):5d} clips | conflict share {df['conflict'].mean():.2f}")
+train_df, valid_df, test_df = splits["train"], splits["valid"], splits["test"]
+"""),
+        md(r"""
+## Readings, fusion and loss
+
+`read` runs the four prompts and keeps, for each, the 7 label logits and the last hidden state. `fuse` builds
+`Q`. Gate features (variant D): the three polarity distributions, their pairwise L1 distances, the entropy
+of each reading's label distribution, and a 16-dimensional projection of the T+A+V hidden state.
+"""),
+        code(r"""
+def read(row):
+    # per reading: the 7 label logits, the last hidden state, and the log-sum-exp over the whole vocabulary
+    out = {}
+    for c in READINGS:
+        inputs = prepare(build_messages(row, c, ask="label"))
+        logits = model(**inputs, use_cache=False).logits[0, -1].float()
+        out[c] = (logits[label_first_ids].to(HEAD_DEVICE), HIDDEN["h"][0].to(HEAD_DEVICE, torch.float32),
+                  float(torch.logsumexp(logits.detach(), dim=-1)))
+    return out
+
+
+def ent(p):
+    return -(p * torch.log(p.clamp_min(1e-12))).sum(-1, keepdim=True)
+
+
+def fuse(out):
+    P = {c: torch.softmax(out[c][0], dim=-1) for c in READINGS}
+    pol = {m: torch.log_softmax(heads.pol[m](out[m][1]), dim=-1) for m in "TAV"}
+    if VARIANT == "B":
+        return P["TAV"], None, pol
+    w = torch.softmax(heads.mix, dim=0)
+    separate = w[0] * P["T"] + w[1] * P["A"] + w[2] * P["V"]
+    if VARIANT == "C":
+        pi = torch.sigmoid(heads.gate_const)
+    else:
+        q = {m: pol[m].exp() for m in "TAV"}
+        feats = torch.cat([q["T"], q["A"], q["V"],
+                           (q["T"] - q["A"]).abs().sum(-1, keepdim=True), (q["T"] - q["V"]).abs().sum(-1, keepdim=True),
+                           (q["A"] - q["V"]).abs().sum(-1, keepdim=True),
+                           ent(P["TAV"]), ent(P["T"]), ent(P["A"]), ent(P["V"]), heads.proj(out["TAV"][1])])
+        pi = torch.sigmoid(heads.gate(feats))
+    return pi * P["TAV"] + (1 - pi) * separate, pi, pol
+
+
+def losses(row, Q, pol):
+    human = torch.tensor(row["human"], dtype=torch.float32, device=HEAD_DEVICE)
+    main = -(human * torch.log(Q.clamp_min(1e-8))).sum()
+    aux = sum(-pol[m][int(row[f"pol_{m}"])] for m in "TAV") / 3
+    return main, aux
+
+
+def jsd(p, q):
+    m = (p + q) / 2
+    kl = lambda a, b: np.where(a > 0, a * np.log(np.clip(a, 1e-12, None) / np.clip(b, 1e-12, None)), 0).sum(axis=-1)
+    return (kl(p, m) + kl(q, m)) / 2
+
+
+@torch.inference_mode()
+def validate(df):
+    model.eval()
+    Qs, mains, auxs, pis, pol_hits = [], [], [], [], []
+    for _, row in df.iterrows():
+        Q, pi, pol = fuse(read(row))
+        main, aux = losses(row, Q, pol)
+        mains.append(float(main)); auxs.append(float(aux))
+        Qs.append(Q.cpu().numpy()); pis.append(float(pi) if pi is not None else np.nan)
+        pol_hits.append([int(pol[m].argmax()) == int(row[f"pol_{m}"]) for m in "TAV"])
+    model.train()
+    Qs, human, conflict = np.array(Qs), np.stack(df["human"]), df["conflict"].to_numpy() == 1
+    pis = np.array(pis)
+    return {"val_loss": float(np.mean(mains)), "val_aux": float(np.mean(auxs)), "val_jsd": float(jsd(Qs, human).mean()),
+            "val_acc": float((np.array(LABELS)[Qs.argmax(1)] == df["ds_label"].to_numpy()).mean()),
+            "val_entropy": float(-(Qs * np.log(np.clip(Qs, 1e-12, None))).sum(1).mean()),
+            "val_polarity_acc": [round(float(x), 3) for x in np.mean(pol_hits, axis=0)],
+            "val_pi_no_conflict": float(np.nanmean(pis[~conflict])) if (~conflict).any() and not np.isnan(pis).all() else None,
+            "val_pi_conflict": float(np.nanmean(pis[conflict])) if conflict.any() and not np.isnan(pis).all() else None}
+"""),
+        md(r"""
+## Checkpoints and resume
+
+As in RQ3; the heads are saved next to the adapter (`heads.pt`).
+"""),
+        code(r"""
+optimizer = torch.optim.AdamW([{"params": lora_params, "lr": LR}, {"params": list(heads.parameters()), "lr": HEAD_LR}],
+                              weight_decay=0.0)
+steps_per_epoch = -(-len(train_df) // GRAD_ACCUM)
+total_steps = EPOCHS * steps_per_epoch
+warmup_steps = max(1, int(WARMUP * total_steps))
+scheduler = torch.optim.lr_scheduler.LambdaLR(
+    optimizer, lambda s: min((s + 1) / warmup_steps, max(0.0, (total_steps - s) / max(1, total_steps - warmup_steps))))
+scaler = torch.amp.GradScaler("cuda", enabled=ON_GPU)
+SIZES = {m: len(df) for m, df in splits.items()}
+state = {"variant": VARIANT, "seed": SEED, "sizes": SIZES, "epoch": 0, "pos": 0, "opt_step": 0, "loss_sum": 0.0,
+         "aux_sum": 0.0, "loss_n": 0, "oom": 0, "history": [], "best_epoch": None, "best_val_loss": None, "train_done": False}
+
+
+def read_state(folder):
+    path = Path(folder) / "state.json"
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def save_weights(folder):
+    torch.save(get_peft_model_state_dict(model), folder / "adapter.pt")
+    torch.save(heads.state_dict(), folder / "heads.pt")
+
+
+def load_weights(folder):
+    set_peft_model_state_dict(model, torch.load(folder / "adapter.pt", map_location="cpu"))
+    heads.load_state_dict(torch.load(folder / "heads.pt", map_location="cpu"))
+
+
+def save_checkpoint():
+    tmp = OUT_DIR / "last.tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir()
+    save_weights(tmp)
+    torch.save({"optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                "scaler": scaler.state_dict()}, tmp / "optim.pt")
+    shutil.rmtree(OUT_DIR / "last", ignore_errors=True)
+    tmp.rename(OUT_DIR / "last")
+    state["saved_at"] = time.time()
+    (OUT_DIR / "state.json").write_text(json.dumps(state, indent=1))
+
+
+def out_of_time():
+    return (time.time() - T_START) / 3600 > TIME_BUDGET_H
+
+
+def same_run(s):
+    return s.get("sizes") == SIZES and s.get("seed", 0) == SEED and s.get("variant") == VARIANT
+
+
+if read_state(OUT_DIR) is None:
+    found = [(s, Path(p).parent) for p in glob.glob(f"/kaggle/input/**/{RUN_NAME}/state.json", recursive=True)
+             if (s := read_state(Path(p).parent))]
+    usable = [(s, d) for s, d in found if same_run(s)]
+    if len(usable) < len(found):
+        print(f"ignoring {len(found) - len(usable)} earlier run(s) made with different clip counts, seed or variant")
+    if usable:
+        src = max(usable, key=lambda x: x[0].get("saved_at", 0))[1]
+        shutil.copytree(src, OUT_DIR, dirs_exist_ok=True)
+        print("copied earlier run from", src)
+
+saved = read_state(OUT_DIR)
+if saved and same_run(saved):
+    state.update(saved)
+    if (OUT_DIR / "last" / "adapter.pt").exists():
+        load_weights(OUT_DIR / "last")
+        opt = torch.load(OUT_DIR / "last" / "optim.pt", map_location="cpu")
+        optimizer.load_state_dict(opt["optimizer"])
+        scheduler.load_state_dict(opt["scheduler"])
+        scaler.load_state_dict(opt["scaler"])
+    print(f"resuming: epoch {state['epoch']}, clip {state['pos']}/{len(train_df)}, optimizer step {state['opt_step']},",
+          "training done" if state["train_done"] else "")
+else:
+    print(f"fresh start: {total_steps} optimizer steps ({EPOCHS} epochs x {steps_per_epoch})")
+"""),
+        md(r"""
+## Train
+
+As in RQ3: one clip (four readings) per forward step, gradients summed over `GRAD_ACCUM` clips, a fixed
+shuffled order per epoch, the best epoch chosen by the validation loss (cross-entropy of `Q` to the votes).
+"""),
+        code(r"""
+def train():
+    model.train()
+    t_run, n_run = time.time(), 0
+    while state["epoch"] < EPOCHS:
+        epoch = state["epoch"]
+        order = np.random.default_rng(1000 * SEED + epoch).permutation(len(train_df))
+        while state["pos"] < len(order):
+            if out_of_time():
+                save_checkpoint()
+                return False
+            batch = order[state["pos"]:state["pos"] + GRAD_ACCUM]
+            for i in batch:
+                row = train_df.iloc[i]
+                try:
+                    Q, _, pol = fuse(read(row))
+                    main, aux = losses(row, Q, pol)
+                    scaler.scale((main + AUX_WEIGHT * aux) / len(batch)).backward()
+                    state["loss_sum"] += main.item()
+                    state["aux_sum"] += aux.item()
+                    state["loss_n"] += 1
+                except torch.cuda.OutOfMemoryError:
+                    optimizer.zero_grad(set_to_none=True)  # a partial backward may have left gradients
+                    torch.cuda.empty_cache()
+                    state["oom"] += 1
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(lora_params + list(heads.parameters()), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            scheduler.step()
+            state["pos"] += len(batch)
+            state["opt_step"] += 1
+            n_run += len(batch)
+            if state["pos"] % CKPT_EVERY == 0 or state["pos"] == len(order):
+                save_checkpoint()
+            if n_run in (48, 200) or state["opt_step"] % 50 == 0:
+                sec = (time.time() - t_run) / n_run
+                left = (EPOCHS * len(train_df) - epoch * len(train_df) - state["pos"]) * sec / 3600
+                peak = max([torch.cuda.max_memory_allocated(d) / 2**30 for d in range(torch.cuda.device_count())] or [0])
+                n = max(1, state["loss_n"])
+                print(f"epoch {epoch} clip {state['pos']}/{len(order)} | loss {state['loss_sum'] / n:.3f} aux {state['aux_sum'] / n:.3f}"
+                      f" | {sec:.2f} s/clip, about {left:.1f} h of training left | peak {peak:.1f} GiB | OOM {state['oom']}")
+        if not any(h["epoch"] == epoch for h in state["history"]):
+            t0 = time.time()
+            metrics = validate(valid_df)
+            n = max(1, state["loss_n"])
+            entry = {"epoch": epoch, "train_loss": state["loss_sum"] / n, "train_aux": state["aux_sum"] / n, **metrics,
+                     "val_minutes": round((time.time() - t0) / 60, 1), "session_hours": round((time.time() - T_START) / 3600, 2)}
+            state["history"].append(entry)
+            print(entry)
+            if state["best_val_loss"] is None or metrics["val_loss"] < state["best_val_loss"]:
+                state["best_epoch"], state["best_val_loss"] = epoch, metrics["val_loss"]
+                (OUT_DIR / "best").mkdir(exist_ok=True)
+                save_weights(OUT_DIR / "best")
+        state.update(epoch=epoch + 1, pos=0, loss_sum=0.0, aux_sum=0.0, loss_n=0)
+        save_checkpoint()
+    state["train_done"] = True
+    save_checkpoint()
+    return True
+
+
+finished = state["train_done"] or train()
+print("training finished, best epoch:", state["best_epoch"]) if finished else print(
+    "stopped at the time budget: add this notebook's output as an input and commit again")
+"""),
+        md(r"""
+## Score the test and valid splits with the best adapter and heads
+
+Per clip, the four readings are saved as `task = score` records (as in RQ3) and the fused output as one
+`task = fused` record (condition `TAV`, logits = log Q, so a softmax returns Q), with `pi` and the three
+polarity distributions.
+"""),
+        code(r"""
+SCORES = OUT_DIR / "scores.jsonl"
+
+
+def key(rec):
+    return (rec["model"], rec["uid"], rec["condition"], rec["task"])
+
+
+done, n_new = set(), 0
+if finished:
+    model.eval()
+    load_weights(OUT_DIR / "best")
+    records = {}
+    if SCORES.exists():
+        for line in open(SCORES, encoding="utf-8"):
+            if line.strip() and "error" not in (rec := json.loads(line)):
+                records[key(rec)] = rec
+    with open(SCORES, "w", encoding="utf-8") as f:
+        for rec in records.values():
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    done = set(records)
+    jobs = [(row, "test") for _, row in test_df.iterrows()] + [(row, "valid") for _, row in valid_df.iterrows()]
+    todo = [j for j in jobs if (TAG, j[0]["uid"], "TAV", "fused") not in done]
+    print(f"{len(jobs)} clips, {len(jobs) - len(todo)} already done, {len(todo)} to run")
+    for row, split in todo:
+        if out_of_time():
+            print("stopped at the time budget: add this notebook's output as an input and commit again")
+            break
+        new = []
+        try:
+            with torch.inference_mode():
+                t0 = time.perf_counter()
+                out = read(row)
+                Q, pi, pol = fuse(out)
+            for c in READINGS:
+                new.append({"model": TAG, "uid": row["uid"], "condition": c, "task": "score", "split": split,
+                            "lse": out[c][2], **{f"logit_{l}": float(v) for l, v in zip(LABELS, out[c][0].tolist())}})
+            logq = torch.log(Q.clamp_min(1e-12))
+            new.append({"model": TAG, "uid": row["uid"], "condition": "TAV", "task": "fused", "split": split,
+                        "gpu_s": round(time.perf_counter() - t0, 3), "lse": 0.0, "pi": float(pi) if pi is not None else None,
+                        **{f"pol_{m}": [round(float(x), 4) for x in pol[m].exp().tolist()] for m in "TAV"},
+                        **{f"logit_{l}": float(v) for l, v in zip(LABELS, logq.tolist())}})
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            new = [{"model": TAG, "uid": row["uid"], "condition": "TAV", "task": "fused", "split": split, "error": "oom"}]
+        with open(SCORES, "a", encoding="utf-8") as f:
+            for rec in new:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        n_new += 1
+    print(f"scored {n_new} clips this run")
+"""),
+        md("## Summary"),
+        code(r"""
+print(pd.DataFrame(state["history"]).round(4).to_string(index=False) if state["history"] else "no finished epoch yet")
+if SCORES.exists():
+    s = pd.DataFrame([json.loads(l) for l in open(SCORES, encoding="utf-8") if l.strip()])
+    s = s[(s["task"] == "fused") & s.get("error", pd.Series(index=s.index, dtype=object)).isna()].merge(
+        clips[["uid", "ds_label", "conflict", "label_T", "label_A", "label_V"]], on="uid")
+    if len(s):
+        q = np.exp(s[[f"logit_{l}" for l in LABELS]].to_numpy())
+        s["pred"], s["entropy"] = np.array(LABELS)[q.argmax(1)], -(q * np.log(np.clip(q, 1e-12, None))).sum(1)
+        for m in "TAV":
+            s[f"pol_hit_{m}"] = np.stack(s[f"pol_{m}"]).argmax(1) == (np.sign(s[f"label_{m}"]).astype(int) + 1)
+        print(s.groupby(["split", "conflict"]).agg(n=("uid", "size"), accuracy=("pred", lambda x: (x == s.loc[x.index, "ds_label"]).mean()),
+                                                    entropy=("entropy", "mean"), pi=("pi", "mean"), pol_T=("pol_hit_T", "mean"),
+                                                    pol_A=("pol_hit_A", "mean"), pol_V=("pol_hit_V", "mean")).round(3).to_string())
+"""),
+    ]
+
+
 if __name__ == "__main__":
     write(HERE / "benchmark_qwen25_omni.ipynb", BENCHMARK)
     write(HERE / "run_qwen25_omni.ipynb", RUN)
@@ -1827,3 +2283,5 @@ if __name__ == "__main__":
     write(HERE / "run_emotion_llama.ipynb", EMOLLAMA)
     for arm in ("hard", "soft"):
         write(HERE / f"rq3_lora_{arm}.ipynb", rq3_cells(arm))
+    for variant in ("B", "C", "D"):
+        write(HERE / f"rq4_ci_{variant}.ipynb", rq4_cells(variant))
