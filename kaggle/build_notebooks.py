@@ -70,7 +70,7 @@ SEED = 0
 # Folder made by analysis/preprocess_chsims.py; found automatically under /kaggle/input.
 DATA_DIR = os.environ.get("CHSIMS_MM_DIR")
 if DATA_DIR is None:
-    hits = glob.glob("/kaggle/input/**/manifest.csv", recursive=True)
+    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "manifest.csv"))]  # no ** : media folders make it slow
     assert hits, "No manifest.csv under /kaggle/input: attach the preprocessed dataset."
     DATA_DIR = os.path.dirname(hits[0])
 DATA_DIR = Path(DATA_DIR)
@@ -428,7 +428,7 @@ def key(rec):
 
 done = set()
 for kind, path in FILES.items():
-    sources = sorted(set(glob.glob(f"/kaggle/input/**/omni_runs/{path.name}", recursive=True)) | ({str(path)} if path.exists() else set()))
+    sources = sorted(set(h for k in range(6) for h in glob.glob("/kaggle/input/" + "*/" * k + f"omni_runs/{path.name}")) | ({str(path)} if path.exists() else set()))
     records = {}
     for src in sources:
         with open(src, encoding="utf-8") as f:
@@ -772,7 +772,7 @@ def out_of_time():
 
 
 if read_state(OUT_DIR) is None:
-    found = [(s, Path(p).parent) for p in glob.glob(f"/kaggle/input/**/{RUN_NAME}/state.json", recursive=True)
+    found = [(s, Path(p).parent) for p in (h for k in range(6) for h in glob.glob("/kaggle/input/" + "*/" * k + f"{RUN_NAME}/state.json"))
              if (s := read_state(Path(p).parent))]
     usable = [(s, d) for s, d in found if s.get("sizes") == SIZES and s.get("seed", 0) == SEED]
     if len(usable) < len(found):
@@ -975,7 +975,7 @@ def key(rec):
     return (rec["model"], rec["uid"], rec["condition"], rec["task"])
 
 
-sources = sorted(set(glob.glob("/kaggle/input/**/{run_dir}/scores.jsonl", recursive=True)) | ({str(SCORES)} if SCORES.exists() else set()))
+sources = sorted(set(h for k in range(6) for h in glob.glob("/kaggle/input/" + "*/" * k + "{run_dir}/scores.jsonl")) | ({str(SCORES)} if SCORES.exists() else set()))
 records = {}
 for src in sources:
     for line in open(src, encoding="utf-8"):
@@ -1101,7 +1101,7 @@ T_START = time.time()
 
 DATA_DIR = os.environ.get("CHSIMS_MM_DIR")
 if DATA_DIR is None:
-    hits = glob.glob("/kaggle/input/**/manifest.csv", recursive=True)
+    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "manifest.csv"))]  # no ** : media folders make it slow
     assert hits, "No manifest.csv under /kaggle/input: attach the preprocessed dataset."
     DATA_DIR = os.path.dirname(hits[0])
 DATA_DIR = Path(DATA_DIR)
@@ -1295,7 +1295,7 @@ T_START = time.time()
 
 DATA_DIR = os.environ.get("CHSIMS_MM_DIR")
 if DATA_DIR is None:
-    hits = glob.glob("/kaggle/input/**/manifest.csv", recursive=True)
+    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "manifest.csv"))]  # no ** : media folders make it slow
     assert hits, "No manifest.csv under /kaggle/input: attach the preprocessed dataset."
     DATA_DIR = os.path.dirname(hits[0])
 DATA_DIR = Path(DATA_DIR)
@@ -1506,7 +1506,7 @@ T_START = time.time()
 
 DATA_DIR = os.environ.get("CHSIMS_MM_DIR")
 if DATA_DIR is None:
-    hits = glob.glob("/kaggle/input/**/manifest.csv", recursive=True)
+    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "manifest.csv"))]  # no ** : media folders make it slow
     assert hits, "No manifest.csv under /kaggle/input: attach the preprocessed dataset."
     DATA_DIR = os.path.dirname(hits[0])
 DATA_DIR = Path(DATA_DIR)
@@ -1726,7 +1726,7 @@ T_START = time.time()
 
 DATA_DIR = os.environ.get("CHSIMS_MM_DIR")
 if DATA_DIR is None:
-    hits = glob.glob("/kaggle/input/**/manifest.csv", recursive=True)
+    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "manifest.csv"))]  # no ** : media folders make it slow
     assert hits, "No manifest.csv under /kaggle/input: attach the preprocessed dataset."
     DATA_DIR = os.path.dirname(hits[0])
 DATA_DIR = Path(DATA_DIR)
@@ -1934,6 +1934,7 @@ class CIHeads(torch.nn.Module):
     # polarity head per modality (negative / neutral / positive), gate for the fused reading, mixture weights
     def __init__(self, d, n_labels):
         super().__init__()
+        self.norm = torch.nn.LayerNorm(d, elementwise_affine=False)  # raw hidden states are large: keep the heads unsaturated
         self.pol = torch.nn.ModuleDict({m: torch.nn.Linear(d, 3) for m in "TAV"})
         self.proj = torch.nn.Linear(d, 16)
         self.gate = torch.nn.Sequential(torch.nn.Linear(9 + 3 + 4 + 16, 32), torch.nn.GELU(), torch.nn.Linear(32, 1))
@@ -1995,7 +1996,7 @@ def ent(p):
 
 def fuse(out):
     P = {c: torch.softmax(out[c][0], dim=-1) for c in READINGS}
-    pol = {m: torch.log_softmax(heads.pol[m](out[m][1]), dim=-1) for m in "TAV"}
+    pol = {m: torch.log_softmax(heads.pol[m](heads.norm(out[m][1])), dim=-1) for m in "TAV"}
     if VARIANT == "B":
         return P["TAV"], None, pol
     w = torch.softmax(heads.mix, dim=0)
@@ -2007,7 +2008,7 @@ def fuse(out):
         feats = torch.cat([q["T"], q["A"], q["V"],
                            (q["T"] - q["A"]).abs().sum(-1, keepdim=True), (q["T"] - q["V"]).abs().sum(-1, keepdim=True),
                            (q["A"] - q["V"]).abs().sum(-1, keepdim=True),
-                           ent(P["TAV"]), ent(P["T"]), ent(P["A"]), ent(P["V"]), heads.proj(out["TAV"][1])])
+                           ent(P["TAV"]), ent(P["T"]), ent(P["A"]), ent(P["V"]), heads.proj(heads.norm(out["TAV"][1]))])
         pi = torch.sigmoid(heads.gate(feats))
     return pi * P["TAV"] + (1 - pi) * separate, pi, pol
 
@@ -2101,7 +2102,7 @@ def same_run(s):
 
 
 if read_state(OUT_DIR) is None:
-    found = [(s, Path(p).parent) for p in glob.glob(f"/kaggle/input/**/{RUN_NAME}/state.json", recursive=True)
+    found = [(s, Path(p).parent) for p in (h for k in range(6) for h in glob.glob("/kaggle/input/" + "*/" * k + f"{RUN_NAME}/state.json"))
              if (s := read_state(Path(p).parent))]
     usable = [(s, d) for s, d in found if same_run(s)]
     if len(usable) < len(found):
@@ -2167,7 +2168,7 @@ def train():
             n_run += len(batch)
             if state["pos"] % CKPT_EVERY == 0 or state["pos"] == len(order):
                 save_checkpoint()
-            if n_run in (48, 200) or state["opt_step"] % 50 == 0:
+            if n_run <= 2 * GRAD_ACCUM or n_run in (48, 200) or state["opt_step"] % 50 == 0:
                 sec = (time.time() - t_run) / n_run
                 left = (EPOCHS * len(train_df) - epoch * len(train_df) - state["pos"]) * sec / 3600
                 peak = max([torch.cuda.max_memory_allocated(d) / 2**30 for d in range(torch.cuda.device_count())] or [0])
@@ -2179,7 +2180,8 @@ def train():
             metrics = validate(valid_df)
             n = max(1, state["loss_n"])
             entry = {"epoch": epoch, "train_loss": state["loss_sum"] / n, "train_aux": state["aux_sum"] / n, **metrics,
-                     "val_minutes": round((time.time() - t0) / 60, 1), "session_hours": round((time.time() - T_START) / 3600, 2)}
+                     "val_minutes": round((time.time() - t0) / 60, 1), "session_hours": round((time.time() - T_START) / 3600, 2),
+                     "peak_gib": [round(torch.cuda.max_memory_allocated(d) / 2**30, 1) for d in range(torch.cuda.device_count())]}
             state["history"].append(entry)
             print(entry)
             if state["best_val_loss"] is None or metrics["val_loss"] < state["best_val_loss"]:
