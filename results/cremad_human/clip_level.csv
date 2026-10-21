@@ -1,0 +1,6 @@
+predictor,Spearman with audio-visual entropy,AUROC: flags disagreement
+"conflict, binary","0.184 [0.159, 0.209]","0.561 [0.540, 0.581]"
+"conflict, graded (JSD audio vs video)","0.091 [0.062, 0.120]","0.521 [0.494, 0.548]"
+"ambiguity, audio only (entropy)","0.185 [0.159, 0.208]","0.582 [0.565, 0.599]"
+"ambiguity, video only (entropy)","0.492 [0.471, 0.512]","0.750 [0.733, 0.766]"
+"all four, linear (fitted on train actors; test actors only)","0.526 [0.483, 0.565]","0.755 [0.721, 0.786]"

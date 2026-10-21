@@ -128,6 +128,23 @@ def split_actors(actors: pd.DataFrame, seed: int = 0) -> dict[int, str]:
     return out
 
 
+def clip_table() -> pd.DataFrame:
+    """One row per clip: actor, sentence, intended emotion and level, split by actor, votes per condition."""
+    responses = pd.read_csv(io.BytesIO(fetch(f"{RAW}/finishedResponses.csv")), low_memory=False)
+    actors = pd.read_csv(io.BytesIO(fetch(f"{RAW}/VideoDemographics.csv")))
+    names = pd.read_csv(io.BytesIO(fetch(f"{RAW}/SentenceFilenames.csv")))["Filename"]
+
+    clips = pd.DataFrame({"uid": names})
+    parts = clips.uid.str.split("_", expand=True)
+    clips["actor"] = parts[0].astype(int)
+    clips["sentence_code"], clips["text"] = parts[1], parts[1].map(SENTENCES)
+    clips["intended"], clips["level"] = parts[2].map(INTENDED), parts[3].map(LEVEL)
+    clips["video_id"] = clips.actor.astype(str)  # grouping key for video-level bootstraps (one actor = one "video")
+    clips["mode"] = clips.actor.map(split_actors(actors))
+    clips = clips.merge(actors.rename(columns={"ActorID": "actor"}), on="actor", how="left")
+    return clips.merge(votes_table(responses), left_on="uid", right_index=True, how="left")
+
+
 def process_clip(row: dict, out_dir: Path, args: argparse.Namespace) -> dict:
     clip, actor = row["uid"], str(row["actor"])
     frames_rel, audio_rel = Path("frames") / actor / clip, Path("audio") / actor / f"{clip}.wav"
@@ -175,19 +192,7 @@ def main() -> None:
     args = parser.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    responses = pd.read_csv(io.BytesIO(fetch(f"{RAW}/finishedResponses.csv")), low_memory=False)
-    actors = pd.read_csv(io.BytesIO(fetch(f"{RAW}/VideoDemographics.csv")))
-    names = pd.read_csv(io.BytesIO(fetch(f"{RAW}/SentenceFilenames.csv")))["Filename"]
-
-    clips = pd.DataFrame({"uid": names})
-    parts = clips.uid.str.split("_", expand=True)
-    clips["actor"] = parts[0].astype(int)
-    clips["sentence_code"], clips["text"] = parts[1], parts[1].map(SENTENCES)
-    clips["intended"], clips["level"] = parts[2].map(INTENDED), parts[3].map(LEVEL)
-    clips["video_id"] = clips.actor.astype(str)  # grouping key for video-level bootstraps (one actor = one "video")
-    clips["mode"] = clips.actor.map(split_actors(actors))
-    clips = clips.merge(actors.rename(columns={"ActorID": "actor"}), on="actor", how="left")
-    clips = clips.merge(votes_table(responses), left_on="uid", right_index=True, how="left")
+    clips = clip_table()
     if args.limit:
         clips = clips.groupby("mode").head(max(1, args.limit // 3)).reset_index(drop=True)
 

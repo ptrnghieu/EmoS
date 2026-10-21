@@ -1,0 +1,5 @@
+quantity,value
+fitted Dirichlet concentration (alpha),1.254
+"check: about 7 raters predict the other 3, empirical",0.36
+"check: the same, simulated from the fitted model (mean)",0.376
+"ceiling: Spearman of a perfect predictor with the observed audio-visual entropy (mean [2.5%, 97.5%])","0.778 [0.767, 0.788]"
