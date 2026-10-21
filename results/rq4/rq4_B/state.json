@@ -1,0 +1,68 @@
+{
+ "variant": "B",
+ "seed": 0,
+ "sizes": {
+  "train": 2722,
+  "valid": 647,
+  "test": 1034
+ },
+ "epoch": 2,
+ "pos": 0,
+ "opt_step": 682,
+ "loss_sum": 0.0,
+ "aux_sum": 0.0,
+ "loss_n": 0,
+ "oom": 0,
+ "history": [
+  {
+   "epoch": 0,
+   "train_loss": 1.0813529475335124,
+   "train_aux": 0.6622253458601033,
+   "val_loss": 1.0328192217707335,
+   "val_aux": 0.6644214259970133,
+   "val_jsd": 0.16761762186543422,
+   "val_acc": 0.6537867078825348,
+   "val_entropy": 1.0729213953018188,
+   "val_polarity_acc": [
+    0.796,
+    0.679,
+    0.723
+   ],
+   "val_pi_no_conflict": null,
+   "val_pi_conflict": null,
+   "val_minutes": 36.0,
+   "session_hours": 6.91,
+   "peak_gib": [
+    12.2,
+    10.9
+   ]
+  },
+  {
+   "epoch": 1,
+   "train_loss": 0.9356839657221592,
+   "train_aux": 0.5333975741162781,
+   "val_loss": 1.0138279729676785,
+   "val_aux": 0.6188037582101672,
+   "val_jsd": 0.15698907940353937,
+   "val_acc": 0.6537867078825348,
+   "val_entropy": 0.9725856781005859,
+   "val_polarity_acc": [
+    0.802,
+    0.731,
+    0.72
+   ],
+   "val_pi_no_conflict": null,
+   "val_pi_conflict": null,
+   "val_minutes": 32.7,
+   "session_hours": 2.38,
+   "peak_gib": [
+    10.7,
+    9.6
+   ]
+  }
+ ],
+ "best_epoch": 1,
+ "best_val_loss": 1.0138279729676785,
+ "train_done": true,
+ "saved_at": 1792530721.748083
+}

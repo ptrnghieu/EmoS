@@ -1,0 +1,2 @@
+arm,seed,"pi, no conflict","pi, conflict",pi SD across clips,pi: conflict minus no conflict,AUROC: 1 - pi flags conflict,AUROC: 1 - pi flags disagreement,"Spearman(1 - pi, human entropy)","Spearman(1 - pi, T/A/V label spread)"
+D,0,0.7710070360994115,0.7413657575468474,0.09959800238813375,"-0.030 [-0.048, -0.009]","0.586 [0.527, 0.639]","0.513 [0.469, 0.555]","0.116 [0.034, 0.190]","-0.018 [-0.132, 0.099]"

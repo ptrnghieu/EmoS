@@ -1,0 +1,6 @@
+arm,signal,AUROC: flags conflict,Spearman with T/A/V label spread,Spearman with human entropy,head accuracy T,head accuracy A,head accuracy V,"head accuracy T, conflict","head accuracy A, conflict","head accuracy V, conflict"
+A,"T, A, V label readings: mean pairwise JSD","0.592 [0.553, 0.628]",0.20093640027463086,0.16998306033889224,,,,,,
+B,"T, A, V label readings: mean pairwise JSD","0.613 [0.576, 0.649]",0.22592751999526564,0.16733517747563656,,,,,,
+B,polarity heads: mean pairwise L1,"0.704 [0.656, 0.750]",0.23572096445200402,0.21120784517958024,0.7882011605415861,0.7340425531914894,0.7127659574468085,0.7746835443037975,0.5772151898734177,0.569620253164557
+D,"T, A, V label readings: mean pairwise JSD","0.611 [0.572, 0.649]",0.19882442942309075,0.19589296171183238,,,,,,
+D,polarity heads: mean pairwise L1,"0.700 [0.652, 0.748]",0.22546099510411888,0.22081636077438496,0.7852998065764023,0.7388781431334622,0.7195357833655706,0.7670886075949367,0.5924050632911393,0.5721518987341773
