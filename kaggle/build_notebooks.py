@@ -2452,6 +2452,54 @@ print(clips[clips["uid"].isin(total)]["mode"].value_counts().to_dict())
 ]
 
 
+# ---- CREMA-D preprocessing (CPU only) -----------------------------------------------------------
+
+PREP_CREMAD = [
+    md(r"""
+# CREMA-D: download and preprocess (Kaggle, CPU only)
+
+Downloads the 7,442 CREMA-D clips (Cao et al., 2014; ODbL 1.0) straight from the dataset's GitHub LFS store,
+extracts frames (2 fps, longest side 448) and 16 kHz mono audio, and writes `manifest.csv` with the raters' votes
+in each condition (audio only, video only, audio-visual) and a split by actor (70/10/20 %). Same layout as the
+CH-SIMS v2 folder, so the scoring and fine-tuning notebooks read it the same way. The script is
+`analysis/preprocess_cremad.py`, written into the notebook below.
+
+**Running it**
+1. *Accelerator*: **None** (CPU, no GPU quota); *Internet*: **on**. No input needed.
+2. **Save & Run All (Commit)**. About 1-2 hours; download is the slow part. Clips that fail (network) are
+   marked `error: ...` in `status`; commit again with this notebook's output attached as an input to retry
+   only those (finished clips are skipped).
+3. The output folder `/kaggle/working/cremad_mm/` (about 1.5 GB) is the input of the CREMA-D run notebooks.
+"""),
+    code(r"""
+import shutil, subprocess
+if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+    subprocess.run("apt-get update -qq && apt-get install -y -qq ffmpeg", shell=True, check=True)
+print(subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True).stdout.splitlines()[0])
+"""),
+    code("%%writefile preprocess_cremad.py\n" + (HERE.parent / "analysis" / "preprocess_cremad.py").read_text(encoding="utf-8")),
+    code(r"""
+import glob, os
+# resume: copy an earlier run of this notebook (attached as input) into the working folder
+for src in glob.glob("/kaggle/input/*/cremad_mm") + glob.glob("/kaggle/input/*/*/*/cremad_mm"):
+    if not os.path.exists("/kaggle/working/cremad_mm"):
+        shutil.copytree(src, "/kaggle/working/cremad_mm")
+        print("copied earlier run from", src)
+"""),
+    code(r"""
+!python preprocess_cremad.py --out-dir /kaggle/working/cremad_mm --workers 16
+"""),
+    code(r"""
+import pandas as pd
+m = pd.read_csv("/kaggle/working/cremad_mm/manifest.csv")
+print(m["status"].str.slice(0, 40).value_counts().to_string())
+print(m.groupby("mode").agg(actors=("actor", "nunique"), clips=("uid", "size")).to_string())
+shutil.rmtree("/kaggle/working/cremad_mm/tmp_video", ignore_errors=True)
+print(subprocess.run(["du", "-sh", "/kaggle/working/cremad_mm"], capture_output=True, text=True).stdout)
+"""),
+]
+
+
 if __name__ == "__main__":
     write(HERE / "benchmark_qwen25_omni.ipynb", BENCHMARK)
     write(HERE / "run_qwen25_omni.ipynb", RUN)
@@ -2464,3 +2512,4 @@ if __name__ == "__main__":
     for variant in ("B", "C", "D"):
         write(HERE / f"rq4_ci_{variant}.ipynb", rq4_cells(variant))
     write(HERE / "probe_hidden.ipynb", PROBE)
+    write(HERE / "prep_cremad.ipynb", PREP_CREMAD)
