@@ -1,0 +1,7 @@
+signal,Spearman with human entropy,AUROC: flags disagreement
+oracle: conflict (per-modality polarities differ),"0.169 [0.101, 0.242]","0.561 [0.531, 0.591]"
+oracle: modalities differing from the multimodal label (0-3),"0.184 [0.112, 0.257]","0.572 [0.541, 0.604]"
+oracle: T/A/V label spread,"0.065 [-0.017, 0.150]","0.530 [0.489, 0.570]"
+model A: entropy of the output,"0.292 [0.229, 0.347]","0.709 [0.676, 0.740]"
+model B: entropy of the output,"0.298 [0.237, 0.355]","0.713 [0.681, 0.745]"
+model D: entropy of the output,"0.301 [0.243, 0.356]","0.712 [0.682, 0.744]"

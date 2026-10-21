@@ -13,6 +13,8 @@ answer). Criteria fixed before the runs (proposal, 20/10/2026):
     secondary   JSD to the 3-vote distribution, AUROC for clips where the annotators disagree, whether the
                 T, A, V readings flag conflict clips, following of the odd modality closer to the humans'
     constraint  accuracy on clips where all 3 annotators agree does not drop below A's
+Two further tables: a ceiling (how well the CH-SIMS v2 conflict labels themselves, an oracle, rank human
+disagreement) and, exploratory and added after seeing the results, D's gate refitted on the valid split.
 No temperature scaling: the criteria are on the raw outputs. Clips missing from any seed-0 run (OOM) are
 dropped from every arm so all comparisons use the same clips.
 
@@ -28,6 +30,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize
 
 from rq3_analysis import N_BOOT, Bootstrap, softmax
 from rq_analysis import LABELS, POLARITY, auroc, entropy, following, jsd, load_humans, markdown, odd_one_out, spearman
@@ -216,6 +219,50 @@ def main() -> None:
         rows.append({"who": arm, **row, "sum |arm - humans| over follows odd T, A, V":
                      sum(abs(row[k] - human_row[k]) for k in rate_keys)})
     tables["rq4_follows_odd_modality_flips_seed0"] = pd.DataFrame(rows)
+
+    # ---- ceiling: how much of human disagreement can knowing the conflict explain? --------------
+    # Human-side signals use the CH-SIMS v2 labels (an oracle no model has); model rows for comparison.
+    signals = {"oracle: conflict (per-modality polarities differ)": conflict.astype(float),
+               "oracle: modalities differing from the multimodal label (0-3)": test.n_deviating.to_numpy(float),
+               "oracle: T/A/V label spread": spread}
+    signals.update({f"model {arm}: entropy of the output": entropy(output(arm, 0)) for arm in arms0})
+    tables["rq4_ceiling_conflict_vs_disagreement"] = pd.DataFrame(
+        [{"signal": k, "Spearman with human entropy": boot(lambda i, x=x: spearman(x[i], human_ent[i])),
+          "AUROC: flags disagreement": boot(lambda i, x=x: auroc(x[i], disagree[i]))} for k, x in signals.items()])
+
+    # ---- exploratory (after seeing the results): refit the gate of D on the valid split ----------
+    # pi = sigmoid(a + b * L1 of the polarity heads), or one pi for every clip; T, A, V weights refitted;
+    # cross-entropy to the votes. Asks whether a better-trained gate would have helped.
+    if "D" in arms0:
+        r = runs[("D", 0)]
+        valid = h[(h["mode"] == "valid") & h.uid.isin(r["extra"].index)].reset_index(drop=True)
+
+        def parts(df):
+            P = {c: softmax(r["readings"].loc[[(u, c) for u in df.uid]].to_numpy(float)) for c in ("TAV", "T", "A", "V")}
+            q = {m: np.stack(r["extra"].loc[df.uid, f"pol_{m}"].to_numpy()) for m in "TAV"}
+            l1 = (np.abs(q["T"] - q["A"]).sum(1) + np.abs(q["T"] - q["V"]).sum(1) + np.abs(q["A"] - q["V"]).sum(1)) / 3
+            return P, l1
+
+        def mix(theta, P, l1, per_clip):
+            a, b, *w = theta
+            w = np.exp(w) / np.exp(w).sum()
+            pi = 1 / (1 + np.exp(-(a + (b if per_clip else 0.0) * l1)))[:, None]
+            return pi * P["TAV"] + (1 - pi) * (w[0] * P["T"] + w[1] * P["A"] + w[2] * P["V"])
+
+        (Pv, l1v), (Pt, l1t) = parts(valid), parts(test)
+        Hv = np.stack(valid.human_dist)
+        rows = []
+        for label, per_clip in (("one pi for every clip", False), ("pi from the polarity heads' L1", True)):
+            loss = lambda th: -(Hv * np.log(np.clip(mix(th, Pv, l1v, per_clip), 1e-12, None))).sum(1).mean()
+            fit = min((minimize(loss, np.array([a, b, 0, 0, 0.0]), method="Nelder-Mead", options={"maxiter": 4000})
+                       for a in (-1.0, 1.0) for b in (-3.0, 3.0)), key=lambda res: res.fun)
+            st = stats(mix(fit.x, Pt, l1t, per_clip))
+            rows.append({"gate refitted on valid": label, **{k: boot(st[k]) for k in
+                         ("Spearman(entropy, human entropy)", "JSD to humans", "accuracy, all 3 agree")}})
+        st = stats(output("D", 0))
+        rows.append({"gate refitted on valid": "D as trained (reference)", **{k: boot(st[k]) for k in
+                     ("Spearman(entropy, human entropy)", "JSD to humans", "accuracy, all 3 agree")}})
+        tables["rq4_exploratory_refit_gate_D"] = pd.DataFrame(rows)
 
     # ---- training history ----------------------------------------------------------------------
     rows = []

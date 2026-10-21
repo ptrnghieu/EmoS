@@ -1,0 +1,4 @@
+gate refitted on valid,"Spearman(entropy, human entropy)",JSD to humans,"accuracy, all 3 agree"
+one pi for every clip,"0.291 [0.232, 0.348]","0.161 [0.151, 0.170]","0.861 [0.825, 0.897]"
+pi from the polarity heads' L1,"0.298 [0.239, 0.354]","0.160 [0.151, 0.170]","0.859 [0.823, 0.894]"
+D as trained (reference),"0.301 [0.243, 0.356]","0.161 [0.151, 0.170]","0.863 [0.827, 0.901]"
