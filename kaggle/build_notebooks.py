@@ -994,7 +994,8 @@ def out_of_time():
         md(r"""
 ## Run
 
-All clips under T+A+V first, then T, A and V, so a run cut short still has the main condition complete.
+All clips under the first condition in `CONDITIONS` (the full one) first, then the others, so a run cut short
+still has the main condition complete.
 A clip that fails (for example out of memory) is saved with an `error` field and retried on the next run.
 """),
         code(run_score.strip("\n") + "\n\n" + r"""
@@ -2500,6 +2501,243 @@ print(subprocess.run(["du", "-sh", "/kaggle/working/cremad_mm"], capture_output=
 ]
 
 
+# ---- M2 on CREMA-D: zero-shot label scoring with Qwen2.5-Omni-7B and MiniCPM-o 2.6 --------------
+
+CREMAD_DATA = r"""
+# Folder made by kaggle/prep_cremad.ipynb (analysis/preprocess_cremad.py); found automatically under /kaggle/input.
+DATA_DIR = os.environ.get("CREMAD_MM_DIR")
+if DATA_DIR is None:
+    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "cremad_mm/manifest.csv"))]
+    assert hits, "No cremad_mm/manifest.csv under /kaggle/input: attach the output of prep_cremad.ipynb."
+    DATA_DIR = os.path.dirname(hits[0])
+DATA_DIR = Path(DATA_DIR)
+"""
+
+CREMAD_CLIPS = [
+    md(r"""
+## Clips
+
+All clips with `status == ok` (7,438). `ds_label` (the audio-visual raters' majority label, ties to the first label)
+is used only for the accuracy column of the quick check at the end.
+"""),
+    code(r"""
+manifest = pd.read_csv(DATA_DIR / "manifest.csv", dtype={"video_id": str})
+clips = manifest[manifest["status"] == "ok"].reset_index(drop=True)
+clips["ds_label"] = np.array(LABELS)[clips[[f"av_{l}" for l in LABELS]].to_numpy().argmax(1)]
+if LIMIT:
+    clips = pd.concat([clips[clips["mode"] == "test"].head(LIMIT), clips[clips["mode"] != "test"].head(LIMIT)])
+print(len(clips), "clips to score")
+"""),
+]
+
+CREMAD_TEXT = r"""
+LABELS = ["Anger", "Disgust", "Fear", "Happy", "Neutral", "Sad"]  # CREMA-D's six labels, as the raters saw them
+DESCRIBE = {  # the three conditions the raters saw; no transcript (raters did not read the sentence)
+    "AV": "the video frames and the audio track",
+    "A": "only the audio track",
+    "V": "only the video frames, without sound",
+}
+CONDITIONS = list(DESCRIBE)
+ASK = f"Which emotion does the speaker express? Choose exactly one of: {', '.join(LABELS)}.\nAnswer with the label only."
+
+
+def intro(condition):
+    return f"You are given {DESCRIBE[condition]} of an actor saying a short sentence.\n"
+"""
+
+CREMAD_HEAD = r"""
+**Running it**
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: the output of `prep_cremad.ipynb` (`cremad_mm/`).
+2. First set `LIMIT = 10` and run all interactively; send the timing lines and the quick-check table.
+3. Full run: `LIMIT = None`, **Save Version → Save & Run All (Commit)**. It stops after `TIME_BUDGET_H`;
+   to continue, add this notebook's output as an input and commit again (finished items are skipped).
+"""
+
+CREMAD_QWEN = [
+    md(r"""
+# M2 on CREMA-D: Qwen2.5-Omni-7B zero-shot (Kaggle, 2× T4)
+
+Label scoring of all CREMA-D clips under the three conditions the human raters saw: audio-visual (`AV`), audio only
+(`A`), video only (`V`). No transcript, since the raters did not read the sentence. Six labels (CREMA-D's).
+Same scoring as the CH-SIMS runs: logits of each label's first token + log-sum-exp over the vocabulary, written to
+`/kaggle/working/cremad_qwen/scores.jsonl`.
+""" + CREMAD_HEAD),
+    INSTALL,
+    code(COMMON_CONFIG + CREMAD_DATA + r"""
+TIME_BUDGET_H = 11.0         # stop starting new items after this many hours
+LIMIT = None                 # e.g. 10 for a quick check: 10 test clips + 10 other clips
+OUT_DIR = Path(os.environ.get("OUT_DIR", "/kaggle/working/cremad_qwen"))
+T_START = time.time()
+""" + COMMON_REPORT),
+    md("## Load the processor and the thinker model"),
+    LOAD_MODEL,
+    md("## Prompt"),
+    code(CREMAD_TEXT + r"""
+SYSTEM = ("You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of "
+          "perceiving auditory and visual inputs, as well as generating text and speech.")
+label_first_ids = [processor.tokenizer.encode(l, add_special_tokens=False)[0] for l in LABELS]
+assert len(set(label_first_ids)) == len(LABELS), "two labels share a first token"
+
+
+def build_messages(row, condition):
+    content = []
+    if "V" in condition:
+        frames = sorted(glob.glob(str(DATA_DIR / row["frames_dir"] / "*.jpg")))
+        content.append({"type": "video", "video": [f"file://{f}" for f in frames],
+                        "sample_fps": float(row["sample_fps"]), "max_pixels": FRAME_MAX_PIXELS})
+    if "A" in condition:
+        content.append({"type": "audio", "audio": str(DATA_DIR / row["audio_path"])})
+    content.append({"type": "text", "text": intro(condition) + ASK})
+    return [{"role": "system", "content": [{"type": "text", "text": SYSTEM}]},
+            {"role": "user", "content": content}]
+
+
+def prepare(messages):
+    text = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    audios, images, videos, video_kwargs = process_mm_info(messages, use_audio_in_video=False, return_video_kwargs=True)
+    fps = video_kwargs.pop("fps", [])  # qwen-omni-utils returns a per-video list; the processor wants one number
+    if fps:
+        video_kwargs["fps"] = float(fps[0])
+    inputs = processor(text=text, audio=audios, images=images, videos=videos, return_tensors="pt",
+                       padding=True, use_audio_in_video=False, **video_kwargs)
+    if model is not None:
+        inputs = {k: (v.to(model.device, dtype=model.dtype) if torch.is_floating_point(v) else v.to(model.device))
+                  if torch.is_tensor(v) else v for k, v in inputs.items()}
+    return inputs
+"""),
+    *CREMAD_CLIPS,
+    *score_cells("cremad_qwen", r"""
+@torch.inference_mode()
+def run_score(row, condition):
+    t0 = time.perf_counter()
+    inputs = prepare(build_messages(row, condition))
+    t1 = time.perf_counter()
+    logits = model(**inputs, use_cache=False).logits[0, -1].float()
+    rec = {"model": MODEL_ID, "uid": row["uid"], "condition": condition, "task": "score",
+           "n_tokens": int(inputs["input_ids"].shape[1]), "prep_s": round(t1 - t0, 3),
+           "gpu_s": round(time.perf_counter() - t1, 3), "finite": bool(torch.isfinite(logits).all()),
+           "lse": float(torch.logsumexp(logits, dim=-1))}
+    rec.update({f"logit_{l}": float(v) for l, v in zip(LABELS, logits[label_first_ids].tolist())})
+    return rec
+"""),
+]
+
+
+CREMAD_MINICPM = [
+    md(r"""
+# M2 on CREMA-D: MiniCPM-o 2.6 zero-shot (Kaggle, 2× T4)
+
+Label scoring of all CREMA-D clips under the three conditions the human raters saw: audio-visual (`AV`), audio only
+(`A`), video only (`V`), without the transcript; six labels. Inputs as in the CH-SIMS MiniCPM-o run: `AV` in the
+model's omni format (one unit per second = one frame + that second of audio), `V` the same frames without audio,
+`A` the whole audio. Written to `/kaggle/working/cremad_minicpm/scores.jsonl`.
+""" + CREMAD_HEAD),
+    MINICPM[1],
+    code(r"""
+import glob
+import json
+import math
+import os
+import shutil
+import time
+from copy import deepcopy
+from pathlib import Path
+
+import librosa
+import numpy as np
+import pandas as pd
+import torch
+from PIL import Image
+
+MODEL_ID = os.environ.get("MODEL_ID", "openbmb/MiniCPM-o-2_6")  # env override: local tests with a tiny model
+SPLIT_LAYER = 13             # LLM layers 0..12 on GPU 0 (with the vision and audio encoders), the rest on GPU 1
+TIME_BUDGET_H = 11.0         # stop starting new items after this many hours
+LIMIT = None                 # e.g. 10 for a quick check: 10 test clips + 10 other clips
+SR = 16000
+OUT_DIR = Path(os.environ.get("OUT_DIR", "/kaggle/working/cremad_minicpm"))
+T_START = time.time()
+DRY_RUN = False
+""" + CREMAD_DATA + COMMON_REPORT),
+    MINICPM[5],
+    MINICPM[6],
+    md("## Prompt and label scoring (as in the CH-SIMS MiniCPM-o run)"),
+    code(CREMAD_TEXT + r"""
+label_first_ids = [tokenizer.encode(l, add_special_tokens=False)[0] for l in LABELS]
+assert len(set(label_first_ids)) == len(LABELS), "two labels share a first token"
+
+
+def per_second_frames(row, n_units):
+    # frames were extracted at row.sample_fps; take the one nearest the middle of each second
+    frames = sorted(glob.glob(str(DATA_DIR / row["frames_dir"] / "*.jpg")))
+    fps = float(row["sample_fps"])
+    return [Image.open(frames[min(len(frames) - 1, int(round((i + 0.5) * fps)))]).convert("RGB") for i in range(n_units)]
+
+
+def build_messages(row, condition):
+    audio = librosa.load(str(DATA_DIR / row["audio_path"]), sr=SR, mono=True)[0] if "A" in condition else None
+    n_units = max(1, math.ceil(float(row["duration"])))
+    text = intro(condition) + ASK
+    if condition == "AV":
+        content = []
+        for i, img in enumerate(per_second_frames(row, n_units)):
+            content += ["<unit>", img, audio[i * SR:(i + 1) * SR]]
+        content.append(text)
+    elif condition == "V":
+        content = per_second_frames(row, n_units) + [text]
+    else:
+        content = [audio, text]
+    return [model.get_sys_prompt(mode="omni", language="en"), {"role": "user", "content": content}]
+
+
+def prepare(messages, omni):
+    images, audios, audio_parts, use_tts = [], [], [], False
+    messages = deepcopy(messages)
+    for i, msg in enumerate(messages):
+        parts = []
+        for c in msg["content"]:
+            if isinstance(c, Image.Image):
+                images.append(c)
+                parts.append("(<image>./</image>)")
+            elif isinstance(c, np.ndarray):  # audio
+                audios.append(c)
+                audio_parts.append(i)
+                parts.append("(<audio>./</audio>)")
+                use_tts = True
+            else:
+                parts.append(c)
+        msg["content"] = ("" if omni else "\n").join(parts)
+    prompt = processor.tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True,
+        chat_template=model.default_tts_chat_template if use_tts else None)
+    inputs = processor([prompt], [images], [audios], [audio_parts], max_slice_nums=1, use_image_id=False,
+                       chunk_input=True, return_tensors="pt", max_length=32768).to(model.device)
+    inputs.pop("image_sizes")  # the model casts pixel values and audio features to its own dtype
+    return inputs
+
+
+@torch.inference_mode()
+def label_logits(inputs):
+    emb, _ = model.get_vllm_embedding(inputs)
+    emb = model.get_omni_embedding(inputs, input_embeddings=emb, chunk_length=model.config.audio_chunk_length)
+    return model.llm(inputs_embeds=emb, attention_mask=inputs["attention_mask"], use_cache=False).logits[0, -1].float()
+"""),
+    *CREMAD_CLIPS,
+    *score_cells("cremad_minicpm", r"""
+def run_score(row, condition):
+    t0 = time.perf_counter()
+    inputs = prepare(build_messages(row, condition), omni=condition == "AV")
+    t1 = time.perf_counter()
+    logits = label_logits(inputs)
+    rec = {"model": MODEL_ID, "uid": row["uid"], "condition": condition, "task": "score",
+           "n_tokens": int(inputs["input_ids"].shape[1]), "prep_s": round(t1 - t0, 3),
+           "gpu_s": round(time.perf_counter() - t1, 3), "finite": bool(torch.isfinite(logits).all()),
+           "lse": float(torch.logsumexp(logits, dim=-1))}
+    rec.update({f"logit_{l}": float(v) for l, v in zip(LABELS, logits[label_first_ids].tolist())})
+    return rec
+"""),
+]
+
+
 if __name__ == "__main__":
     write(HERE / "benchmark_qwen25_omni.ipynb", BENCHMARK)
     write(HERE / "run_qwen25_omni.ipynb", RUN)
@@ -2513,3 +2751,5 @@ if __name__ == "__main__":
         write(HERE / f"rq4_ci_{variant}.ipynb", rq4_cells(variant))
     write(HERE / "probe_hidden.ipynb", PROBE)
     write(HERE / "prep_cremad.ipynb", PREP_CREMAD)
+    write(HERE / "cremad_qwen.ipynb", CREMAD_QWEN)
+    write(HERE / "cremad_minicpm.ipynb", CREMAD_MINICPM)

@@ -66,6 +66,9 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
 11. **Stage 1 probe**: `kaggle/probe_hidden.ipynb`, with the RQ3 soft notebook's output (seed 0, `rq3_soft/best/adapter.pt`)
    attached as a second input; `LIMIT = 10` first, then the full run (about 2-3 hours). Copy `probe_hidden/` to
    `results/probe_hidden/`, then run `probe_analysis.py`.
+12. **CREMA-D** (M1-M3): `kaggle/prep_cremad.ipynb` (CPU) writes `cremad_mm/`. M2: `kaggle/cremad_qwen.ipynb` and
+    `kaggle/cremad_minicpm.ipynb` with `cremad_mm/` attached, `LIMIT = 10` first, then the full run; copy
+    `cremad_qwen/` and `cremad_minicpm/` to `results/`.
 
 ## Note on clip ids
 
