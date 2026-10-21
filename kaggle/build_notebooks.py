@@ -2276,6 +2276,182 @@ if SCORES.exists():
     ]
 
 
+# ---- Stage 1 probe: hidden states of the RQ3 soft LoRA model and of the base model ---------
+
+PROBE = [
+    md(r"""
+# Hidden states for the disagreement probe (Qwen2.5-Omni-7B, Kaggle, 2× T4)
+
+Does the model hold more information about which clips the annotators disagree on than its output entropy
+shows? This notebook reads every clip (train, valid, test) once under T+A+V with the prompt of the other
+runs and saves, at the last position (the one the label is read from), the hidden state after several
+layers of the language model. Each clip is read twice: with the RQ3 soft-label LoRA adapter (`A`) and without
+it (`base`, the zero-shot model). The 7 label logits are saved too, to check against the earlier runs.
+A linear probe is then trained on these states on a CPU (`analysis/probe_analysis.py`).
+
+**Running it**
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: the preprocessed `chsims-mm` dataset **and the
+   output of the RQ3 soft-label notebook (seed 0)**, which holds `rq3_soft/best/adapter.pt`.
+2. First set `LIMIT = 10` and run all interactively (about 5 minutes), then **Save & Run All (Commit)** with
+   `LIMIT = None` (about 2-3 hours). If it stops at `TIME_BUDGET_H`, add this notebook's own output as an input
+   and commit again: finished clips are skipped.
+3. Results: `/kaggle/working/probe_hidden/`: `shard_*.npz` (uids, hidden states, label logits) and `meta.json`.
+   About 350 MB; download the folder and copy it to `results/probe_hidden/`.
+"""),
+    code(r"""
+# peft added for LoRA; the rest as in the other notebooks.
+%pip install -q "transformers==5.20.1" "qwen-omni-utils==0.0.9" "peft==0.21.2" audioread librosa
+# Kaggle ships torchao 0.10; peft 0.21 raises an ImportError for torchao < 0.16 even when it is not used.
+%pip uninstall -y -q torchao
+"""),
+    code(COMMON_CONFIG + r"""
+LORA_R, LORA_ALPHA, LORA_DROPOUT = 16, 32, 0.05  # as in the RQ3 notebooks
+LORA_TARGETS = r"^model\.layers\.\d+\.self_attn\.(q|k|v|o)_proj$"
+SHARD = 250                  # clips per saved shard
+TIME_BUDGET_H = 11.0
+LIMIT = None                 # e.g. 10 for a quick check: 10 clips per split
+OUT_DIR = Path(os.environ.get("OUT_DIR", "/kaggle/working/probe_hidden"))
+T_START = time.time()
+
+ADAPTER = os.environ.get("ADAPTER")
+if ADAPTER is None:
+    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "rq3_soft/best/adapter.pt"))]
+    assert hits, "No rq3_soft/best/adapter.pt under /kaggle/input: attach the output of the RQ3 soft notebook (seed 0)."
+    ADAPTER = hits[0]
+print("adapter:", ADAPTER)
+""" + COMMON_REPORT),
+    md(r"""
+## Load the model and the RQ3 soft adapter
+
+Inference only: fp16, no gradient checkpointing. Forward hooks keep the last position of the residual stream
+after each layer in `LAYERS` (a quarter, half, three quarters of the way, and the last layer) and of the final
+norm (the input of the language-model head).
+"""),
+    code(r"""
+from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
+from qwen_omni_utils import process_mm_info
+from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniThinkerForConditionalGeneration
+
+ON_GPU = torch.cuda.is_available()
+processor = Qwen2_5OmniProcessor.from_pretrained(MODEL_ID)
+kwargs = dict(dtype=torch.float16 if ON_GPU else torch.float32, attn_implementation="sdpa")
+if ON_GPU:
+    kwargs.update(device_map="auto", max_memory=MAX_MEMORY)
+t0 = time.time()
+base = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(MODEL_ID, **kwargs).eval()
+print(f"loaded in {time.time() - t0:.0f} s")
+base.lm_head.register_forward_pre_hook(lambda module, args: (args[0][:, -1:],) + args[1:])
+model = get_peft_model(base, LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
+                                        target_modules=LORA_TARGETS, bias="none"))
+result = set_peft_model_state_dict(model, torch.load(ADAPTER, map_location="cpu"))
+assert not [k for k in result.unexpected_keys if "lora" in k], result.unexpected_keys
+model.eval()
+
+layers = base.model.layers
+n = len(layers)
+LAYERS = sorted({max(1, n // 4), max(1, n // 2), max(1, 3 * n // 4), n})  # hidden state after layer i (1-based)
+HIDDEN = {}
+for i in LAYERS:
+    layers[i - 1].register_forward_hook(lambda mod, args, out, i=i: HIDDEN.__setitem__(
+        f"layer{i}", (out[0] if isinstance(out, tuple) else out)[0, -1].float().cpu()))
+base.model.norm.register_forward_hook(lambda mod, args, out: HIDDEN.__setitem__("norm", out[0, -1].float().cpu()))
+print("layers:", n, "| saved:", LAYERS, "+ norm | hidden size:", base.config.text_config.hidden_size
+      if hasattr(base.config, "text_config") else base.config.hidden_size)
+"""),
+    md("## Prompts (same as the other runs)"),
+    PROMPTS,
+    md("## Clips"),
+    code(r"""
+manifest = pd.read_csv(DATA_DIR / "manifest.csv", dtype={"video_id": str, "clip_id": str})
+clips = manifest[manifest["status"] == "ok"].reset_index(drop=True)
+order = {"test": 0, "valid": 1, "train": 2}  # test first, so a short run still covers the evaluation split
+clips = clips.sort_values("mode", key=lambda m: m.map(order), kind="stable").reset_index(drop=True)
+if LIMIT:
+    clips = clips.groupby("mode", sort=False).head(LIMIT).reset_index(drop=True)
+print(clips["mode"].value_counts().to_dict())
+"""),
+    md(r"""
+## Read every clip twice and save shards
+
+Per clip and model (`A`, `base`): the hidden states and the 7 label logits. Shards found under `/kaggle/input`
+(an earlier run of this notebook) or in `OUT_DIR` are kept and their clips skipped.
+"""),
+    code(r"""
+for p in (h for k in range(6) for h in glob.glob("/kaggle/input/" + "*/" * k + "probe_hidden/shard_*.npz")):
+    if not (OUT_DIR / Path(p).name).exists():
+        shutil.copy(p, OUT_DIR / Path(p).name)
+done = set()
+for p in sorted(OUT_DIR.glob("shard_*.npz")):
+    done |= set(np.load(p, allow_pickle=False)["uid"].tolist())
+todo = clips[~clips["uid"].isin(done)]
+print(f"{len(clips)} clips, {len(done & set(clips['uid']))} already done, {len(todo)} to run")
+
+
+@torch.inference_mode()
+def read(inputs):
+    HIDDEN.clear()
+    logits = model(**inputs, use_cache=False).logits[0, -1].float()
+    return {k: v.numpy().astype(np.float16) for k, v in HIDDEN.items()}, logits[label_first_ids].cpu().numpy()
+
+
+buf, n_oom, t_run = [], 0, time.time()
+
+
+def flush():
+    if not buf:
+        return
+    k = len(list(OUT_DIR.glob("shard_*.npz")))
+    arrays = {"uid": np.array([b["uid"] for b in buf])}
+    for key in buf[0]:
+        if key != "uid":
+            arrays[key] = np.stack([b[key] for b in buf])
+    np.savez(OUT_DIR / f"shard_{k:03d}.npz", **arrays)
+    buf.clear()
+
+
+for j, (_, row) in enumerate(todo.iterrows()):
+    if (time.time() - T_START) / 3600 > TIME_BUDGET_H:
+        print("stopped at the time budget: add this notebook's output as an input and commit again")
+        break
+    try:
+        inputs = prepare(build_messages(row, "TAV", ask="label"))
+        rec = {"uid": row["uid"]}
+        for name in ("A", "base"):
+            if name == "A":
+                hidden, logits = read(inputs)
+            else:
+                with model.disable_adapter():
+                    hidden, logits = read(inputs)
+            rec.update({f"{name}_{k}": v for k, v in hidden.items()})
+            rec[f"{name}_logits"] = logits
+        buf.append(rec)
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        n_oom += 1
+    if len(buf) == SHARD:
+        flush()
+    if j + 1 in (5, 50) or (j + 1) % 500 == 0:
+        sec = (time.time() - t_run) / (j + 1)
+        peak = max([torch.cuda.max_memory_allocated(d) / 2**30 for d in range(torch.cuda.device_count())] or [0])
+        print(f"{j + 1}/{len(todo)} | {sec:.2f} s/clip, about {(len(todo) - j - 1) * sec / 3600:.1f} h left | peak {peak:.1f} GiB | OOM {n_oom}")
+flush()
+(OUT_DIR / "meta.json").write_text(json.dumps({"model": MODEL_ID, "adapter": ADAPTER, "layers": LAYERS, "labels": LABELS,
+                                               "oom_this_run": n_oom}, indent=1))
+"""),
+    md("## Check"),
+    code(r"""
+total = {}
+for p in sorted(OUT_DIR.glob("shard_*.npz")):
+    z = np.load(p, allow_pickle=False)
+    for u in z["uid"].tolist():
+        total[u] = True
+    keys = [k for k in z.files if k != "uid"]
+print(f"{len(total)} of {len(clips)} clips saved | arrays per clip:", {k: z[k].shape[1:] for k in keys})
+print(clips[clips["uid"].isin(total)]["mode"].value_counts().to_dict())
+"""),
+]
+
+
 if __name__ == "__main__":
     write(HERE / "benchmark_qwen25_omni.ipynb", BENCHMARK)
     write(HERE / "run_qwen25_omni.ipynb", RUN)
@@ -2287,3 +2463,4 @@ if __name__ == "__main__":
         write(HERE / f"rq3_lora_{arm}.ipynb", rq3_cells(arm))
     for variant in ("B", "C", "D"):
         write(HERE / f"rq4_ci_{variant}.ipynb", rq4_cells(variant))
+    write(HERE / "probe_hidden.ipynb", PROBE)

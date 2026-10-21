@@ -17,6 +17,7 @@ CH-SIMS v2(s) clips re-annotated in EmoS.
 | `rq_conflict_definitions_and_errors.py` | Follow-ups to the related-work review: RQ1 under four conflict definitions (ours and Du et al.'s), and how many model errors match at least one annotator, without and with conflict: `python analysis/rq_conflict_definitions_and_errors.py --out results/rq_conflict_definitions_and_errors` |
 | `rq2_compare_models.py` | RQ2 across models: Qwen2.5-Omni-7B, MiniCPM-o 2.6, Gemma 4 E4B-it and Phi-4-multimodal (those with results) per condition, with paired bootstrap differences against Qwen and against humans: `python analysis/rq2_compare_models.py --out results/rq2_compare_models` |
 | `rq4_analysis.py` | RQ4 causal-inference fusion on the test split, variants A (RQ3 soft) to D, against the criteria fixed before the runs (primary: Spearman of model vs human entropy, D minus A, per seed), plus the gate pi and the per-modality polarity heads: `python analysis/rq4_analysis.py --out results/rq4_analysis` |
+| `probe_analysis.py` | Stage 1 probe: a softmax probe on the saved hidden states (RQ3 soft adapter and base model) predicting the 3-vote distribution; is it better than the model's output entropy at ranking human disagreement (criterion fixed in the docstring): `python analysis/probe_analysis.py --out results/probe_analysis` |
 | `rq3_analysis.py` | RQ3 comparison on the test split: zero-shot, LoRA hard, LoRA soft, each with and without temperature scaling: `python analysis/rq3_analysis.py --out results/rq3_analysis` |
 | `../kaggle/run_minicpm_o.ipynb` | RQ2 with a second model: MiniCPM-o 2.6 label scoring, all clips × 4 conditions, same record format; resumable |
 | `../kaggle/run_gemma4.ipynb` | RQ2 with a third family: Gemma 4 E4B-it label scoring, same design; records the largest activation per item (fp16 check) |
@@ -60,6 +61,9 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
 10. **RQ4 causal-inference fusion**: `kaggle/rq4_ci_B.ipynb`, `rq4_ci_C.ipynb`, `rq4_ci_D.ipynb`, first with `LIMIT = 10`,
    then the full run (two sessions each; resume as in step 6). Copy each run's last output folder `rq4_<variant>[_seed<N>]/`
    (`scores.jsonl`, `state.json`) to `results/rq4/`, then run `rq4_analysis.py`.
+11. **Stage 1 probe**: `kaggle/probe_hidden.ipynb`, with the RQ3 soft notebook's output (seed 0, `rq3_soft/best/adapter.pt`)
+   attached as a second input; `LIMIT = 10` first, then the full run (about 2-3 hours). Copy `probe_hidden/` to
+   `results/probe_hidden/`, then run `probe_analysis.py`.
 
 ## Note on clip ids
 
