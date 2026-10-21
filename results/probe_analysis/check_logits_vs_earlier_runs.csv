@@ -1,0 +1,3 @@
+model,earlier run,clips compared,max |logit difference|,mean |logit difference|
+A,results/rq3/rq3_soft/scores.jsonl,1681,0.0,0.0
+base,results/omni_runs/scores.jsonl,4403,0.015625,5.86171968787515e-05
