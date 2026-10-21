@@ -70,6 +70,9 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
 12. **CREMA-D** (M1-M3): `kaggle/prep_cremad.ipynb` (CPU) writes `cremad_mm/`. M2: `kaggle/cremad_qwen.ipynb` and
     `kaggle/cremad_minicpm.ipynb` with `cremad_mm/` attached, `LIMIT = 10` first, then the full run; copy
     `cremad_qwen/` and `cremad_minicpm/` to `results/`.
+    M3: `kaggle/cremad_lora.ipynb` (LoRA on the audio-visual vote distribution, test actors scored under AV, A, V);
+    copy `cremad_lora/` to `results/` and run `cremad_models.py --runs` with it and the zero-shot runs (the clips
+    common to all runs are the test actors').
 
 ## Note on clip ids
 

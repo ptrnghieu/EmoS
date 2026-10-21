@@ -2738,6 +2738,92 @@ def run_score(row, condition):
 ]
 
 
+# ---- M3 on CREMA-D: LoRA fine-tuning on the audio-visual raters' vote distribution -------------------
+
+def _cremad_prompt_cell():
+    old = "def build_messages(row, condition):"
+    srcs = [c["source"] if isinstance(c["source"], str) else "".join(c["source"]) for c in CREMAD_QWEN]
+    src = next(x for x in srcs if old in x)
+    assert src.count(old) == 1
+    return code(src.replace(old, 'def build_messages(row, condition, ask="label"):  # `ask` kept for the shared cells'))
+
+
+def _patched(cell, *pairs):
+    src = cell["source"] if isinstance(cell["source"], str) else "".join(cell["source"])
+    for old, new in pairs:
+        assert old in src, (old, src[:80])
+        src = src.replace(old, new)
+    return (md if cell["cell_type"] == "markdown" else code)(src)
+
+
+def cremad_lora_cells():
+    rq3 = rq3_cells("soft")
+    assert len(rq3) == 19, "rq3_cells changed: re-check the patches below"
+    return [
+        md(r"""
+# M3 on CREMA-D: LoRA fine-tuning of Qwen2.5-Omni-7B on the raters' vote distribution (Kaggle, 2× T4)
+
+Same recipe as the RQ3 soft-label arm (LoRA rank 16 on the language model's attention, 2 epochs, the epoch with
+the lowest validation loss kept), on CREMA-D: the target of each clip is the distribution of the audio-visual
+raters' votes (about 10 per clip) over the six labels; input = video frames + audio, no transcript (as the raters
+saw it). Split by actor (64 / 9 / 18 actors). The adapter is then scored on the test actors under AV, A and V,
+and on the valid actors under AV, in the record format of the zero-shot CREMA-D runs.
+
+**Running it**
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: the output of `prep_cremad.ipynb` (`cremad_mm/`).
+2. First set `LIMIT = 10` and run all interactively; send the progress lines (speed, peak memory). Do **not**
+   attach that run's output later.
+3. **Save Version → Save & Run All (Commit)**. If it stops at `TIME_BUDGET_H`, add this notebook's own output as
+   an input and commit again: training resumes from the last checkpoint, scoring skips finished clips.
+4. Results: `/kaggle/working/cremad_lora/` with `scores.jsonl`, `state.json` and the best adapter.
+"""),
+        rq3[1],
+        _patched(rq3[2],
+                 ("DATA_DIR = Path(DATA_DIR)\n", "DATA_DIR = Path(DATA_DIR)\n" + CREMAD_DATA),
+                 ('# "hard": ds_label; "soft": distribution of the 3 annotators', "# soft: the audio-visual raters' vote distribution"),
+                 ('RUN_NAME = f"rq3_{ARM}{SUFFIX}"', 'RUN_NAME = f"cremad_lora{SUFFIX}"'),
+                 ('TAG = f"{MODEL_ID}+lora-{ARM}', 'TAG = f"{MODEL_ID}+cremad-lora-{ARM}')),
+        rq3[3], rq3[4],
+        md("## Prompt (as in the zero-shot CREMA-D run)"),
+        _cremad_prompt_cell(),
+        md(r"""
+## Clips and targets
+
+`target` = `human` = the audio-visual raters' votes as a distribution over the six labels. `ds_label` (their
+majority label) and `conflict` (the audio-only and video-only raters' top labels share no label) are used only in
+the validation accuracy and the summary.
+"""),
+        code(r"""
+manifest = pd.read_csv(DATA_DIR / "manifest.csv", dtype={"video_id": str})
+clips = manifest[manifest["status"] == "ok"].reset_index(drop=True)
+clips["ds_label"] = np.array(LABELS)[clips[[f"av_{l}" for l in LABELS]].to_numpy().argmax(1)]
+a, v = (clips[[f"{k}_{l}" for l in LABELS]].to_numpy() for k in ("a", "v"))
+clips["conflict"] = (~((a == a.max(1, keepdims=True)) & (v == v.max(1, keepdims=True))).any(1)).astype(int)
+splits = {m: clips[clips["mode"] == m].reset_index(drop=True) for m in ("train", "valid", "test")}
+if LIMIT:
+    splits = {m: df.head(LIMIT) for m, df in splits.items()}
+for m, df in splits.items():
+    human = df[[f"av_{l}" for l in LABELS]].to_numpy(float)
+    human = human / human.sum(1, keepdims=True)
+    df["human"], df["target"] = list(human), list(human)
+    print(f"{m:5s} {len(df):5d} clips, {df['actor'].nunique()} actors | majority labels: {df['ds_label'].value_counts().to_dict()}")
+train_df, valid_df, test_df = splits["train"], splits["valid"], splits["test"]
+"""),
+        _patched(rq3[9], ("T+A+V", "audio-visual")),
+        _patched(rq3[10], ('def label_logits(row, condition="TAV"):', 'def label_logits(row, condition="AV"):')),
+        rq3[11], rq3[12], rq3[13], rq3[14],
+        md(r"""
+## Score the test actors with the best adapter
+
+Test actors under AV, A and V; valid actors under AV (for temperature scaling). Same record format as the
+zero-shot CREMA-D runs, with `model` set to `TAG`.
+"""),
+        _patched(rq3[16], ('jobs += [(row, "TAV", "valid")', 'jobs += [(row, "AV", "valid")')),
+        rq3[17],
+        _patched(rq3[18], ('(s["condition"] == "TAV")', '(s["condition"] == "AV")'), ('"test T+A+V,', '"test AV,')),
+    ]
+
+
 if __name__ == "__main__":
     write(HERE / "benchmark_qwen25_omni.ipynb", BENCHMARK)
     write(HERE / "run_qwen25_omni.ipynb", RUN)
@@ -2753,3 +2839,4 @@ if __name__ == "__main__":
     write(HERE / "prep_cremad.ipynb", PREP_CREMAD)
     write(HERE / "cremad_qwen.ipynb", CREMAD_QWEN)
     write(HERE / "cremad_minicpm.ipynb", CREMAD_MINICPM)
+    write(HERE / "cremad_lora.ipynb", cremad_lora_cells())
