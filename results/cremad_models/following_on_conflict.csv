@@ -1,0 +1,4 @@
+who,conflict clips,takes the audio-only top label,takes the video-only top label
+humans (AV raters pooled),3358,0.22087782449559878,0.5417284249372334
+Qwen2.5-Omni-7B,3358,0.5467540202501489,0.19386539606908873
+MiniCPM-o 2.6,3358,0.40530077427039907,0.3511018463371054
