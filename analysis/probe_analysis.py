@@ -56,21 +56,24 @@ def load_shards(folder: Path) -> tuple[list[str], dict[str, np.ndarray]]:
     return [uids[i] for i in first], {k: v[first] for k, v in arrays.items()}
 
 
-def fit_softmax(X: np.ndarray, Y: np.ndarray, lam: float) -> np.ndarray:
+def fit_softmax(X: np.ndarray, Y: np.ndarray, lam: float, w0: np.ndarray | None = None) -> np.ndarray:
+    """Convex, so a warm start (w0, the solution for a larger lambda) changes the speed, not the solution."""
     n, d = X.shape
-    Xb = np.hstack([X, np.ones((n, 1), np.float32)])
+    Xb = np.hstack([X, np.ones((n, 1), np.float32)]).astype(np.float32)
+    Yf = Y.astype(np.float32)
 
     def f(w):
-        W = w.reshape(d + 1, Y.shape[1])
+        W = w.reshape(d + 1, Y.shape[1]).astype(np.float32)
         Z = Xb @ W
         Z -= Z.max(1, keepdims=True)
         logp = Z - np.log(np.exp(Z).sum(1, keepdims=True))
-        loss = -(Y * logp).sum(1).mean() + lam * (W[:-1] ** 2).sum()
-        grad = Xb.T @ (np.exp(logp) - Y) / n
+        loss = -(Yf * logp).sum(1).mean() + lam * (W[:-1] ** 2).sum()
+        grad = Xb.T @ (np.exp(logp) - Yf) / n
         grad[:-1] += 2 * lam * W[:-1]
-        return loss, grad.ravel()
+        return float(loss), grad.ravel().astype(np.float64)
 
-    res = minimize(f, np.zeros((d + 1) * Y.shape[1]), jac=True, method="L-BFGS-B", options={"maxiter": 500})
+    x0 = np.zeros((d + 1) * Y.shape[1]) if w0 is None else w0.ravel()
+    res = minimize(f, x0, jac=True, method="L-BFGS-B", options={"maxiter": 500})
     return res.x.reshape(d + 1, Y.shape[1])
 
 
@@ -135,12 +138,14 @@ def main() -> None:
             X = arr[f"{name}_{f}"]
             mu, sd = X[rows_of["train"]].mean(0), X[rows_of["train"]].std(0) + 1e-6
             Xs = {m: (X[r] - mu) / sd for m, r in rows_of.items()}
-            for lam in LAMBDAS:
-                W = fit_softmax(Xs["train"], Y["train"], lam)
+            W = None
+            for lam in sorted(LAMBDAS, reverse=True):  # large to small lambda, each warm-started from the last
+                W = fit_softmax(Xs["train"], Y["train"], lam, W)
                 Pv, Pt = predict(W, Xs["valid"]), predict(W, Xs["test"])
                 rec = {"model": name, "layer": f, "lambda": f"{lam:g}", "valid CE to votes": ce(Pv, Y["valid"]),
                        "test Spearman (descriptive)": spearman(entropy(Pt), het)}
                 grid.append(rec)
+                print(f"  probe {name} {f} lambda {lam:g}: valid CE {rec['valid CE to votes']:.4f}", flush=True)
                 if best is None or rec["valid CE to votes"] < best[0]["valid CE to votes"]:
                     best = (rec, Pt)
         test_pred[f"probe on {name} states (train-fitted)"] = best
@@ -155,9 +160,10 @@ def main() -> None:
         X = arr[f"A_{f}"]
         mu, sd = X[rows_of["valid"]].mean(0), X[rows_of["valid"]].std(0) + 1e-6
         Xv, Xt = (X[rows_of["valid"]] - mu) / sd, (X[rows_of["test"]] - mu) / sd
-        for lam in LAMBDAS:
-            cv = np.mean([ce(predict(fit_softmax(Xv[fold != k], Y["valid"][fold != k], lam), Xv[fold == k]), Y["valid"][fold == k])
-                          for k in range(5)])
+        Wk = [None] * 5
+        for lam in sorted(LAMBDAS, reverse=True):
+            Wk = [fit_softmax(Xv[fold != k], Y["valid"][fold != k], lam, Wk[k]) for k in range(5)]
+            cv = np.mean([ce(predict(Wk[k], Xv[fold == k]), Y["valid"][fold == k]) for k in range(5)])
             if best is None or cv < best[0]:
                 best = (cv, f, lam, Xv, Xt)
     cv, f, lam, Xv, Xt = best
