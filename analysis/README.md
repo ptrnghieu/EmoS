@@ -16,6 +16,7 @@ CH-SIMS v2(s) clips re-annotated in EmoS.
 | `bci_analysis.py` | Bayesian causal inference (Koerding et al., 2007): human disagreement by T/A/V valence spread (non-monotonicity test), and a training-free combiner over each model's T+A+V and T/A/V answers, with an oracle that uses the human per-modality labels: `python analysis/bci_analysis.py --out results/bci_analysis` |
 | `rq_conflict_definitions_and_errors.py` | Follow-ups to the related-work review: RQ1 under four conflict definitions (ours and Du et al.'s), and how many model errors match at least one annotator, without and with conflict: `python analysis/rq_conflict_definitions_and_errors.py --out results/rq_conflict_definitions_and_errors` |
 | `rq2_compare_models.py` | RQ2 across models: Qwen2.5-Omni-7B, MiniCPM-o 2.6, Gemma 4 E4B-it and Phi-4-multimodal (those with results) per condition, with paired bootstrap differences against Qwen and against humans: `python analysis/rq2_compare_models.py --out results/rq2_compare_models` |
+| `rq4_analysis.py` | RQ4 causal-inference fusion on the test split, variants A (RQ3 soft) to D, against the criteria fixed before the runs (primary: Spearman of model vs human entropy, D minus A, per seed), plus the gate pi and the per-modality polarity heads: `python analysis/rq4_analysis.py --out results/rq4_analysis` |
 | `rq3_analysis.py` | RQ3 comparison on the test split: zero-shot, LoRA hard, LoRA soft, each with and without temperature scaling: `python analysis/rq3_analysis.py --out results/rq3_analysis` |
 | `../kaggle/run_minicpm_o.ipynb` | RQ2 with a second model: MiniCPM-o 2.6 label scoring, all clips × 4 conditions, same record format; resumable |
 | `../kaggle/run_gemma4.ipynb` | RQ2 with a third family: Gemma 4 E4B-it label scoring, same design; records the largest activation per item (fp16 check) |
@@ -56,6 +57,9 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
    `results/gemma4_runs/` and `results/phi4mm_runs/`, run `rq_analysis.py` on each, then `rq2_compare_models.py`.
    `kaggle/run_emotion_llama.ipynb` the same way (results in `emollama_runs/`); its records have no Disgust logit,
    so it appears only in the six-label tables of `rq2_compare_models.py` (Disgust removed from every model and the humans).
+10. **RQ4 causal-inference fusion**: `kaggle/rq4_ci_B.ipynb`, `rq4_ci_C.ipynb`, `rq4_ci_D.ipynb`, first with `LIMIT = 10`,
+   then the full run (two sessions each; resume as in step 6). Copy each run's last output folder `rq4_<variant>[_seed<N>]/`
+   (`scores.jsonl`, `state.json`) to `results/rq4/`, then run `rq4_analysis.py`.
 
 ## Note on clip ids
 
