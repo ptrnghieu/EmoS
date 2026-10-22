@@ -1,0 +1,4 @@
+quantity,value
+"Spearman(A^V, I^V): visual ambiguity vs perceived visual intensity","-0.541 [-0.561, -0.519]"
+"Spearman(A^AV, I^V)","-0.392 [-0.417, -0.365]"
+"Spearman(A^AV, A^V)","0.492 [0.471, 0.512]"

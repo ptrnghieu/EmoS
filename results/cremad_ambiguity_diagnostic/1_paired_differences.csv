@@ -1,0 +1,6 @@
+comparison,Spearman with A^AV,AUROC: high disagreement (top 25%),MAE
+"conflict + A^V minus conflict (C_bin, C_jsd)","0.352 [0.326, 0.378]","0.172 [0.155, 0.187]","-0.026 [-0.029, -0.024]"
+"A^V minus conflict (C_bin, C_jsd)","0.318 [0.290, 0.347]","0.152 [0.133, 0.170]","-0.024 [-0.027, -0.021]"
+all: conflict + A^V + A^A + controls minus all without A^V,"0.044 [0.033, 0.055]","0.027 [0.020, 0.034]","-0.006 [-0.007, -0.005]"
+all: conflict + A^V + A^A + controls minus conflict + controls,"0.051 [0.041, 0.063]","0.032 [0.025, 0.040]","-0.007 [-0.008, -0.005]"
+A^V minus A^A,"0.308 [0.276, 0.343]","0.150 [0.129, 0.172]","-0.024 [-0.027, -0.021]"
