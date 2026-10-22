@@ -74,6 +74,8 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
     M3: `kaggle/cremad_lora.ipynb` (LoRA on the audio-visual vote distribution, test actors scored under AV, A, V);
     copy `cremad_lora/` to `results/` and run `cremad_models.py --runs` with it and the zero-shot runs (the clips
     common to all runs are the test actors').
+13. **Stage 1** (CREMA-D, per-condition supervision): `kaggle/stage1_cremad.ipynb`, one committed version per
+    (`ARM`, `PHASE`, `FOLD`, `SEED`, lambdas); copy each `stage1_*` output folder to `results/stage1/`.
 
 ## Note on clip ids
 

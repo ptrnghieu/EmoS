@@ -2824,6 +2824,402 @@ zero-shot CREMA-D runs, with `model` set to `TAG`.
     ]
 
 
+# ---- Stage 1 on CREMA-D: per-condition supervision (AV + V + A votes, + perceived intensity) -------
+
+STAGE1 = [
+    md(r"""
+# Stage 1 on CREMA-D: does per-condition supervision make the AV entropy track human disagreement? (Kaggle, 2× T4)
+
+One LoRA on Qwen2.5-Omni-7B, three readings of each clip (audio-visual `AV`, video only `V`, audio only `A`, no
+transcript), each trained on the vote distribution of the raters of **that** condition (different people, about 10
+per clip), plus a small head per reading for the raters' mean perceived intensity:
+
+    L = CE(q_AV, p_AV) + LAMBDA_V * CE(q_V, p_V) + LAMBDA_A * CE(q_A, p_A) + LAMBDA_I * sum_m (intensity_m - z(I_m))^2
+
+No head predicts disagreement: the question is whether the AV prediction's normalised entropy H(q_AV) / log K tracks
+the AV raters' disagreement better than with AV supervision alone. The readings share no computation, so each is
+back-propagated on its own (memory as for one reading).
+
+**Arms** (`ARM`):
+- `m3`: AV soft labels only (the M3 recipe; baseline).
+- `s1`: AV + V + A votes + intensity.
+- `s1_noI`: AV + V + A votes, no intensity.
+- `s1_avlab`: V and A readings trained on the **AV** votes (ablation: extra readings without per-condition labels).
+
+**Folds.** Actors are split into `N_OUTER` = 3 outer folds (fixed seed, stratified by sex). `PHASE = "outer"`: train
+on the other two folds' actors, score fold `FOLD`'s actors. `PHASE = "inner"` (lambda search): within the training
+actors of fold `FOLD`, hold out 15% of actors and score those instead; the outer fold is not touched.
+
+**Running it**
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on** (the rater responses are downloaded for the intensity targets);
+   *Add input*: the output of `prep_cremad.ipynb` (`cremad_mm/`).
+2. Set `ARM`, `PHASE`, `FOLD`, `SEED` (and `LAMBDA_V`, `LAMBDA_A` for the lambda search) in the config cell.
+   First run with `LIMIT = 10` once and send the progress lines.
+3. **Save & Run All (Commit)**. If it stops at `TIME_BUDGET_H`, attach this notebook's own output and commit again.
+4. Results: `/kaggle/working/<RUN_NAME>/` with `scores.jsonl` (every scored clip under AV, V and A) and `state.json`.
+"""),
+    code(r"""
+# peft added for LoRA; the rest as in the other notebooks.
+%pip install -q "transformers==5.20.1" "qwen-omni-utils==0.0.9" "peft==0.21.2" audioread librosa
+# Kaggle ships torchao 0.10; peft 0.21 raises an ImportError for torchao < 0.16 even when it is not used.
+%pip uninstall -y -q torchao
+"""),
+    code(COMMON_CONFIG + CREMAD_DATA + r"""
+ARM = os.environ.get("ARM", "s1")            # m3 | s1 | s1_noI | s1_avlab
+PHASE = os.environ.get("PHASE", "outer")     # outer: score the outer fold | inner: lambda search on held-out training actors
+FOLD = int(os.environ.get("FOLD", 0))        # outer fold, 0..N_OUTER-1
+SEED = int(os.environ.get("SEED", 0))
+LAMBDA_V = float(os.environ.get("LAMBDA_V", 0.25))
+LAMBDA_A = float(os.environ.get("LAMBDA_A", 0.25))
+LAMBDA_I = 0.0 if ARM in ("m3", "s1_noI", "s1_avlab") else float(os.environ.get("LAMBDA_I", 0.1))
+N_OUTER, INNER_VAL_SHARE, SPLIT_SEED = 3, 0.15, 0
+LORA_R, LORA_ALPHA, LORA_DROPOUT = 16, 32, 0.05
+LORA_TARGETS = r"^model\.layers\.\d+\.self_attn\.(q|k|v|o)_proj$"
+LR, HEAD_LR = 1e-4, 1e-3
+EPOCHS = 1
+GRAD_ACCUM = 8
+WARMUP = 0.03
+CKPT_EVERY = 200
+TRAIN_MAX_MEMORY = {0: "10GiB", 1: "14GiB"}
+TIME_BUDGET_H = 11.0
+LIMIT = None                 # e.g. 10 for a quick check: 10 training clips and 10 scored clips
+assert ARM in ("m3", "s1", "s1_noI", "s1_avlab") and PHASE in ("outer", "inner") and 0 <= FOLD < N_OUTER
+TRAIN_CONDS = ("AV",) if ARM == "m3" else ("AV", "V", "A")
+RUN_NAME = f"stage1_{ARM}_f{FOLD}_s{SEED}" + (f"_inner_v{LAMBDA_V:g}_a{LAMBDA_A:g}" if PHASE == "inner" else "")
+TAG = f"{MODEL_ID}+{RUN_NAME}"
+OUT_DIR = Path(os.environ.get("OUT_DIR", f"/kaggle/working/{RUN_NAME}"))
+T_START = time.time()
+print("run:", RUN_NAME, "| lambdas V/A/I:", LAMBDA_V, LAMBDA_A, LAMBDA_I)
+""" + COMMON_REPORT),
+    md("## Load the model, add LoRA and the intensity heads"),
+    code(r"""
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict, set_peft_model_state_dict
+from qwen_omni_utils import process_mm_info
+from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniThinkerForConditionalGeneration
+
+ON_GPU = torch.cuda.is_available()
+processor = Qwen2_5OmniProcessor.from_pretrained(MODEL_ID)
+kwargs = dict(dtype=torch.float16 if ON_GPU else torch.float32, attn_implementation="sdpa")
+if ON_GPU:
+    kwargs.update(device_map="auto", max_memory=TRAIN_MAX_MEMORY)
+t0 = time.time()
+base = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(MODEL_ID, **kwargs)
+print(f"loaded in {time.time() - t0:.0f} s")
+base.config.use_cache = False
+base.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+HIDDEN = {}
+
+
+def keep_last(module, args):
+    HIDDEN["h"] = args[0][:, -1]
+    return (args[0][:, -1:],) + args[1:]
+
+
+base.lm_head.register_forward_pre_hook(keep_last)
+torch.manual_seed(SEED)
+model = get_peft_model(base, LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
+                                        target_modules=LORA_TARGETS, bias="none"))
+lora_params = [p for p in model.parameters() if p.requires_grad]
+HEAD_DEVICE = base.lm_head.weight.device
+
+
+class IntensityHeads(torch.nn.Module):
+    # one linear head per reading on the last hidden state: the raters' mean perceived intensity, standardised
+    def __init__(self, d):
+        super().__init__()
+        self.norm = torch.nn.LayerNorm(d, elementwise_affine=False)
+        self.out = torch.nn.ModuleDict({c: torch.nn.Linear(d, 1) for c in ("AV", "V", "A")})
+
+    def forward(self, h, c):
+        return self.out[c](self.norm(h)).squeeze(-1)
+
+
+hidden_size = base.config.text_config.hidden_size if hasattr(base.config, "text_config") else base.config.hidden_size
+heads = IntensityHeads(hidden_size).to(HEAD_DEVICE, torch.float32)
+print(f"LoRA trainable params: {sum(p.numel() for p in lora_params) / 1e6:.1f} M | intensity heads: "
+      f"{sum(p.numel() for p in heads.parameters()) / 1e3:.0f} k | readings trained: {TRAIN_CONDS}")
+for i in range(torch.cuda.device_count()):
+    print(f"cuda:{i} allocated after load: {torch.cuda.memory_allocated(i) / 2**30:.1f} GiB")
+"""),
+    md("## Prompt (as in the zero-shot CREMA-D run)"),
+    "PROMPT_PLACEHOLDER",
+    md(r"""
+## Clips, folds and targets
+
+`p_AV`, `p_V`, `p_A`: each condition's vote distribution over the six labels (`s1_avlab`: `p_V` = `p_A` = `p_AV`).
+`I_AV`, `I_V`, `I_A`: the mean intensity rating (1-100) of that condition's raters, from CREMA-D's
+`finishedResponses.csv`, standardised with the training clips' mean and SD per condition (`zI_*`), so that the squared
+error starts near 1, on the scale of the cross-entropies. Folds are made from actors with a fixed seed, independent of
+`SEED`.
+"""),
+    code(r"""
+import io
+import urllib.request
+
+manifest = pd.read_csv(DATA_DIR / "manifest.csv", dtype={"video_id": str})
+clips = manifest[manifest["status"] == "ok"].reset_index(drop=True)
+url = "https://raw.githubusercontent.com/CheyneyComputerScience/CREMA-D/master/finishedResponses.csv"
+resp = pd.read_csv(io.BytesIO(urllib.request.urlopen(url, timeout=120).read()), low_memory=False)
+resp = resp.drop_duplicates(["localid", "clipName", "queryType"])
+resp["level"] = pd.to_numeric(resp["respLevel"], errors="coerce")
+inten = resp.groupby(["clipName", "queryType"])["level"].mean().unstack().rename(columns={1: "I_A", 2: "I_V", 3: "I_AV"})
+clips = clips.merge(inten, left_on="uid", right_index=True, how="left")
+for c, k in (("AV", "av"), ("V", "v"), ("A", "a")):
+    votes = clips[[f"{k}_{l}" for l in LABELS]].to_numpy(float)
+    clips[f"p_{c}"] = list(votes / votes.sum(1, keepdims=True))
+if ARM == "s1_avlab":
+    clips["p_V"], clips["p_A"] = clips["p_AV"], clips["p_AV"]
+
+rng = np.random.default_rng(SPLIT_SEED)
+actor_sex = clips.groupby("actor")["Sex"].first()
+outer = {}
+for _, group in actor_sex.groupby(actor_sex):
+    for k, a in enumerate(rng.permutation(group.index.to_numpy())):
+        outer[int(a)] = k % N_OUTER
+clips["outer_fold"] = clips["actor"].map(outer)
+train_actors = sorted(a for a, f in outer.items() if f != FOLD)
+inner_val = set(np.random.default_rng(SPLIT_SEED + 1 + FOLD).permutation(train_actors)[:max(1, round(INNER_VAL_SHARE * len(train_actors)))])
+if PHASE == "outer":
+    train_df = clips[clips["outer_fold"] != FOLD].reset_index(drop=True)
+    eval_df = clips[clips["outer_fold"] == FOLD].reset_index(drop=True)
+else:
+    trainval = clips[clips["outer_fold"] != FOLD]
+    train_df = trainval[~trainval["actor"].isin(inner_val)].reset_index(drop=True)
+    eval_df = trainval[trainval["actor"].isin(inner_val)].reset_index(drop=True)
+if LIMIT:
+    train_df, eval_df = train_df.head(LIMIT), eval_df.head(LIMIT)
+assert not set(train_df["actor"]) & set(eval_df["actor"])
+I_STATS = {c: (train_df[f"I_{c}"].mean(), train_df[f"I_{c}"].std()) for c in ("AV", "V", "A")}
+for df in (train_df, eval_df):
+    for c, (mu, sd) in I_STATS.items():
+        df[f"zI_{c}"] = (df[f"I_{c}"] - mu) / sd
+print(f"train {len(train_df)} clips / {train_df['actor'].nunique()} actors | scored {len(eval_df)} clips / "
+      f"{eval_df['actor'].nunique()} actors | intensity missing: {int(train_df[['I_AV', 'I_V', 'I_A']].isna().any(axis=1).sum())}")
+"""),
+    md(r"""
+## One clip: readings, losses, back-propagation
+
+Each reading is back-propagated right after its forward pass (the readings share no computation, so the gradient is
+the same as for the summed loss).
+"""),
+    code(r"""
+WEIGHT = {"AV": 1.0, "V": LAMBDA_V, "A": LAMBDA_A}
+
+
+def reading(row, condition):
+    inputs = prepare(build_messages(row, condition))
+    logits = model(**inputs, use_cache=False).logits[0, -1].float()
+    return logits, HIDDEN["h"][0].to(HEAD_DEVICE, torch.float32)
+
+
+def train_clip(row, scale):
+    out = {}
+    for c in TRAIN_CONDS:
+        logits, h = reading(row, c)
+        z = logits[label_first_ids]
+        target = torch.tensor(row[f"p_{c}"], dtype=torch.float32, device=z.device)
+        ce = -(target * torch.log_softmax(z, dim=-1)).sum()
+        loss = WEIGHT[c] * ce.to(HEAD_DEVICE)
+        if LAMBDA_I > 0 and not np.isnan(row[f"zI_{c}"]):
+            loss = loss + LAMBDA_I * (heads(h, c) - float(row[f"zI_{c}"])) ** 2
+        scaler.scale(loss * scale).backward()
+        out[c] = ce.item()
+    return out
+"""),
+    md("## Checkpoints and resume (as in RQ3/RQ4)"),
+    code(r"""
+optimizer = torch.optim.AdamW([{"params": lora_params, "lr": LR}, {"params": list(heads.parameters()), "lr": HEAD_LR}],
+                              weight_decay=0.0)
+steps_per_epoch = -(-len(train_df) // GRAD_ACCUM)
+total_steps = EPOCHS * steps_per_epoch
+warmup_steps = max(1, int(WARMUP * total_steps))
+scheduler = torch.optim.lr_scheduler.LambdaLR(
+    optimizer, lambda s: min((s + 1) / warmup_steps, max(0.0, (total_steps - s) / max(1, total_steps - warmup_steps))))
+scaler = torch.amp.GradScaler("cuda", enabled=ON_GPU)
+IDENT = {"arm": ARM, "phase": PHASE, "fold": FOLD, "seed": SEED, "lambdas": [LAMBDA_V, LAMBDA_A, LAMBDA_I],
+         "sizes": [len(train_df), len(eval_df)]}
+state = {**IDENT, "epoch": 0, "pos": 0, "opt_step": 0, "loss_sum": {}, "loss_n": 0, "oom": 0, "history": [],
+         "train_done": False}
+
+
+def read_state(folder):
+    path = Path(folder) / "state.json"
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def save_weights(folder):
+    torch.save(get_peft_model_state_dict(model), folder / "adapter.pt")
+    torch.save(heads.state_dict(), folder / "heads.pt")
+
+
+def load_weights(folder):
+    set_peft_model_state_dict(model, torch.load(folder / "adapter.pt", map_location="cpu"))
+    heads.load_state_dict(torch.load(folder / "heads.pt", map_location="cpu"))
+
+
+def save_checkpoint():
+    tmp = OUT_DIR / "last.tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir()
+    save_weights(tmp)
+    torch.save({"optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                "scaler": scaler.state_dict()}, tmp / "optim.pt")
+    shutil.rmtree(OUT_DIR / "last", ignore_errors=True)
+    tmp.rename(OUT_DIR / "last")
+    state["saved_at"] = time.time()
+    (OUT_DIR / "state.json").write_text(json.dumps(state, indent=1))
+
+
+def out_of_time():
+    return (time.time() - T_START) / 3600 > TIME_BUDGET_H
+
+
+def same_run(s):
+    return all(s.get(k) == v for k, v in IDENT.items())
+
+
+if read_state(OUT_DIR) is None:
+    found = [(s, Path(p).parent) for p in (h for k in range(6) for h in glob.glob("/kaggle/input/" + "*/" * k + f"{RUN_NAME}/state.json"))
+             if (s := read_state(Path(p).parent))]
+    usable = [(s, d) for s, d in found if same_run(s)]
+    if len(usable) < len(found):
+        print(f"ignoring {len(found) - len(usable)} earlier run(s) with other settings")
+    if usable:
+        src = max(usable, key=lambda x: x[0].get("saved_at", 0))[1]
+        shutil.copytree(src, OUT_DIR, dirs_exist_ok=True)
+        print("copied earlier run from", src)
+
+saved = read_state(OUT_DIR)
+if saved and same_run(saved):
+    state.update(saved)
+    if (OUT_DIR / "last" / "adapter.pt").exists():
+        load_weights(OUT_DIR / "last")
+        opt = torch.load(OUT_DIR / "last" / "optim.pt", map_location="cpu")
+        optimizer.load_state_dict(opt["optimizer"])
+        scheduler.load_state_dict(opt["scheduler"])
+        scaler.load_state_dict(opt["scaler"])
+    print(f"resuming: clip {state['pos']}/{len(train_df)}, step {state['opt_step']}", "| training done" if state["train_done"] else "")
+else:
+    print(f"fresh start: {total_steps} optimizer steps")
+"""),
+    md("## Train (one epoch; no epoch selection, so the scored clips play no part in training choices)"),
+    code(r"""
+def train():
+    model.train()
+    t_run, n_run = time.time(), 0
+    while state["epoch"] < EPOCHS:
+        order = np.random.default_rng(1000 * SEED + state["epoch"]).permutation(len(train_df))
+        while state["pos"] < len(order):
+            if out_of_time():
+                save_checkpoint()
+                return False
+            batch = order[state["pos"]:state["pos"] + GRAD_ACCUM]
+            for i in batch:
+                try:
+                    for c, v in train_clip(train_df.iloc[i], 1.0 / len(batch)).items():
+                        state["loss_sum"][c] = state["loss_sum"].get(c, 0.0) + v
+                    state["loss_n"] += 1
+                except torch.cuda.OutOfMemoryError:
+                    optimizer.zero_grad(set_to_none=True)
+                    torch.cuda.empty_cache()
+                    state["oom"] += 1
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(lora_params + list(heads.parameters()), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            scheduler.step()
+            state["pos"] += len(batch)
+            state["opt_step"] += 1
+            n_run += len(batch)
+            if state["pos"] % CKPT_EVERY == 0 or state["pos"] == len(order):
+                save_checkpoint()
+            if n_run <= 2 * GRAD_ACCUM or n_run in (48, 200) or state["opt_step"] % 50 == 0:
+                sec = (time.time() - t_run) / n_run
+                left = (EPOCHS * len(order) - state["epoch"] * len(order) - state["pos"]) * sec / 3600
+                peak = max([torch.cuda.max_memory_allocated(d) / 2**30 for d in range(torch.cuda.device_count())] or [0])
+                n = max(1, state["loss_n"])
+                print(f"clip {state['pos']}/{len(order)} | CE " + " ".join(f"{c} {v / n:.3f}" for c, v in state["loss_sum"].items())
+                      + f" | {sec:.2f} s/clip, about {left:.1f} h left | peak {peak:.1f} GiB | OOM {state['oom']}")
+        n = max(1, state["loss_n"])
+        state["history"].append({"epoch": state["epoch"], **{f"train_CE_{c}": v / n for c, v in state["loss_sum"].items()},
+                                 "session_hours": round((time.time() - T_START) / 3600, 2)})
+        state.update(epoch=state["epoch"] + 1, pos=0, loss_sum={}, loss_n=0)
+        save_checkpoint()
+    state["train_done"] = True
+    save_checkpoint()
+    return True
+
+
+finished = state["train_done"] or train()
+print("training finished" if finished else "stopped at the time budget: add this notebook's output as an input and commit again")
+"""),
+    md(r"""
+## Score the held-out actors under AV, V and A
+
+Same record format as the zero-shot CREMA-D runs (`model` = `TAG`), plus the intensity heads' outputs.
+"""),
+    code(r"""
+SCORES = OUT_DIR / "scores.jsonl"
+
+
+def key(rec):
+    return (rec["model"], rec["uid"], rec["condition"], rec["task"])
+
+
+n_new = 0
+if finished:
+    model.eval()
+    records = {}
+    if SCORES.exists():
+        for line in open(SCORES, encoding="utf-8"):
+            if line.strip() and "error" not in (rec := json.loads(line)):
+                records[key(rec)] = rec
+    with open(SCORES, "w", encoding="utf-8") as f:
+        for rec in records.values():
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    todo = [(row, c) for _, row in eval_df.iterrows() for c in ("AV", "V", "A") if (TAG, row["uid"], c, "score") not in records]
+    print(f"{len(eval_df) * 3} items, {len(eval_df) * 3 - len(todo)} already done, {len(todo)} to run")
+    for row, c in todo:
+        if out_of_time():
+            print("stopped at the time budget: add this notebook's output as an input and commit again")
+            break
+        rec = {"model": TAG, "uid": row["uid"], "condition": c, "task": "score", "split": PHASE, "fold": FOLD}
+        try:
+            with torch.inference_mode():
+                logits, h = reading(row, c)
+                mu, sd = I_STATS[c]
+                rec.update(lse=float(torch.logsumexp(logits, dim=-1)), intensity_pred=float(heads(h, c)) * sd + mu,
+                           **{f"logit_{l}": float(v) for l, v in zip(LABELS, logits[label_first_ids].tolist())})
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            rec["error"] = "oom"
+        with open(SCORES, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        n_new += 1
+    print(f"scored {n_new} items this run")
+"""),
+    md("## Quick check (the analysis script does the real evaluation)"),
+    code(r"""
+print(state["history"])
+if SCORES.exists():
+    s = pd.DataFrame([json.loads(l) for l in open(SCORES, encoding="utf-8") if l.strip()])
+    s = s[s.get("error", pd.Series(index=s.index, dtype=object)).isna()]
+    z = s[[f"logit_{l}" for l in LABELS]].to_numpy()
+    q = np.exp(z - z.max(1, keepdims=True))
+    q /= q.sum(1, keepdims=True)
+    s["U"] = -(q * np.log(np.clip(q, 1e-12, None))).sum(1) / np.log(len(LABELS))
+    s = s.merge(eval_df[["uid", "p_AV", "p_V", "p_A"]], on="uid")
+    for c in ("AV", "V", "A"):
+        part = s[s["condition"] == c]
+        p = np.stack(part[f"p_{c}"])
+        h = -(p * np.log(np.clip(p, 1e-12, None))).sum(1) / np.log(len(LABELS))
+        print(c, len(part), "clips | Spearman(U, human entropy, same condition):",
+              round(pd.Series(part["U"].to_numpy()).corr(pd.Series(h), method="spearman"), 3))
+"""),
+]
+
+
 if __name__ == "__main__":
     write(HERE / "benchmark_qwen25_omni.ipynb", BENCHMARK)
     write(HERE / "run_qwen25_omni.ipynb", RUN)
@@ -2840,3 +3236,4 @@ if __name__ == "__main__":
     write(HERE / "cremad_qwen.ipynb", CREMAD_QWEN)
     write(HERE / "cremad_minicpm.ipynb", CREMAD_MINICPM)
     write(HERE / "cremad_lora.ipynb", cremad_lora_cells())
+    write(HERE / "stage1_cremad.ipynb", [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in STAGE1])
