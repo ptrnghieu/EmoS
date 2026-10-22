@@ -1,0 +1,5 @@
+who,conflict clips,takes the audio-only top label,takes the video-only top label
+humans (AV raters pooled),683,0.22373684990368944,0.5482293673136761
+Qwen2.5-Omni-7B + LoRA (M3),683,0.2840409956076135,0.5534407027818448
+Qwen2.5-Omni-7B zero-shot,683,0.5461200585651538,0.20790629575402636
+MiniCPM-o 2.6 zero-shot,683,0.3821376281112738,0.37481698389458273

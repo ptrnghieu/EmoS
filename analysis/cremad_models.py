@@ -11,6 +11,8 @@ Tables (all clips; 95% bootstrap over actors):
     clip level      Spearman between the model's entropy and the humans' entropy, per condition (does the model's
                     uncertainty under A or V follow how ambiguous people find the audio or the face alone?);
                     AUROC for clips the AV raters do not agree on
+    reference       each model's AV entropy against the video-only raters' entropy (paired), and the ceiling of a
+                    perfect predictor on the same clips
     conflict        perceived conflict (audio-only and video-only raters' top labels share no label): entropy
                     change on conflict clips, model AV vs human AV; does the model's own A-vs-V disagreement
                     (JSD between its A and V readings) flag perceived conflict?
@@ -30,7 +32,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from cremad_human import counts, entropy_counts, jsd
+from cremad_human import ceiling, counts, entropy_counts, jsd
 from preprocess_cremad import LABELS, clip_table
 from rq3_analysis import N_BOOT, Bootstrap, softmax
 from rq_analysis import auroc, markdown, spearman
@@ -103,6 +105,17 @@ def main() -> None:
                  "Spearman(model entropy, human AV entropy)": boot(lambda i: spearman(Hent["V"][i], Hent["AV"][i])),
                  "AUROC: flags AV disagreement": boot(lambda i: auroc(Hent["V"][i], disagree[i]))})
     tables["clip_level"] = pd.DataFrame(rows)
+
+    # ---- against the reference and the ceiling, on the same clips -----------------------------------
+    c = ceiling(H["AV"], sims=100)
+    rows = [{"comparison": "ceiling: perfect predictor (Dirichlet-multinomial fitted on these clips), mean [2.5%, 97.5%]",
+             "Spearman with human AV entropy": f"{c['perfect'].mean():.3f} [{np.percentile(c['perfect'], 2.5):.3f}, "
+                                               f"{np.percentile(c['perfect'], 97.5):.3f}]"}]
+    for name in P:
+        e = ent(P[name]["AV"])
+        rows.append({"comparison": f"{name} AV entropy minus video-only raters' entropy (paired)",
+                     "Spearman with human AV entropy": boot(lambda i, e=e: spearman(e[i], Hent["AV"][i]) - spearman(Hent["V"][i], Hent["AV"][i]))})
+    tables["reference_and_ceiling"] = pd.DataFrame(rows)
 
     # ---- conflict ----------------------------------------------------------------------------------
     change = lambda e: (lambda i: e[i][conflict[i]].mean() - e[i][~conflict[i]].mean())

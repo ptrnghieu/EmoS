@@ -1,0 +1,5 @@
+comparison,Spearman with human AV entropy
+"ceiling: perfect predictor (Dirichlet-multinomial fitted on these clips), mean [2.5%, 97.5%]","0.777 [0.752, 0.796]"
+Qwen2.5-Omni-7B + LoRA (M3) AV entropy minus video-only raters' entropy (paired),"0.060 [0.016, 0.105]"
+Qwen2.5-Omni-7B zero-shot AV entropy minus video-only raters' entropy (paired),"-0.582 [-0.659, -0.490]"
+MiniCPM-o 2.6 zero-shot AV entropy minus video-only raters' entropy (paired),"-0.419 [-0.482, -0.355]"

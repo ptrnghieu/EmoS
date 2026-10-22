@@ -1,0 +1,5 @@
+who,AV entropy change on perceived conflict,AUROC: its A-vs-V disagreement (JSD) flags perceived conflict,share of clips where its A and V answers differ
+humans (AV raters),"0.114 [0.061, 0.162]",,
+Qwen2.5-Omni-7B + LoRA (M3),"0.059 [-0.001, 0.116]","0.594 [0.548, 0.640]",0.5136054421768708
+Qwen2.5-Omni-7B zero-shot,"0.144 [0.077, 0.213]","0.617 [0.572, 0.667]",0.34285714285714286
+MiniCPM-o 2.6 zero-shot,"0.068 [0.010, 0.126]","0.652 [0.608, 0.696]",0.3238095238095238
