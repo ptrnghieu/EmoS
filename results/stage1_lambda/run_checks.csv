@@ -1,0 +1,10 @@
+run,train_done,expected clips,scored AV,scored V,scored A,OOM in training,complete
+stage1_s1_f0_s0_inner_v0.1_a0.1,True,738,738,738,738,0,True
+stage1_s1_f0_s0_inner_v0.1_a0.25,True,738,738,738,738,0,True
+stage1_s1_f0_s0_inner_v0.1_a0.5,True,738,738,738,738,0,True
+stage1_s1_f0_s0_inner_v0.25_a0.1,True,738,738,738,738,0,True
+stage1_s1_f0_s0_inner_v0.25_a0.25,True,738,738,738,738,0,True
+stage1_s1_f0_s0_inner_v0.25_a0.5,True,738,738,738,738,0,True
+stage1_s1_f0_s0_inner_v0.5_a0.1,True,738,738,738,738,0,True
+stage1_s1_f0_s0_inner_v0.5_a0.25,True,738,738,738,738,0,True
+stage1_s1_f0_s0_inner_v0.5_a0.5,True,738,738,738,738,0,True

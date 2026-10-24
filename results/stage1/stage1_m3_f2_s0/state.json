@@ -1,0 +1,30 @@
+{
+ "arm": "m3",
+ "phase": "outer",
+ "fold": 2,
+ "seed": 0,
+ "lambdas": [
+  0.25,
+  0.25,
+  0.0
+ ],
+ "sizes": [
+  4988,
+  2450
+ ],
+ "epoch": 1,
+ "pos": 0,
+ "opt_step": 624,
+ "loss_sum": {},
+ "loss_n": 0,
+ "oom": 0,
+ "history": [
+  {
+   "epoch": 0,
+   "train_CE_AV": 1.0474240660009537,
+   "session_hours": 4.3
+  }
+ ],
+ "train_done": true,
+ "saved_at": 1792781580.2572508
+}

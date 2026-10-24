@@ -1,0 +1,32 @@
+{
+ "arm": "s1",
+ "phase": "inner",
+ "fold": 0,
+ "seed": 0,
+ "lambdas": [
+  0.25,
+  0.1,
+  0.1
+ ],
+ "sizes": [
+  4160,
+  738
+ ],
+ "epoch": 1,
+ "pos": 0,
+ "opt_step": 520,
+ "loss_sum": {},
+ "loss_n": 0,
+ "oom": 0,
+ "history": [
+  {
+   "epoch": 0,
+   "train_CE_AV": 1.0513981171320594,
+   "train_CE_V": 1.315186953844834,
+   "train_CE_A": 1.3035638019809714,
+   "session_hours": 9.53
+  }
+ ],
+ "train_done": true,
+ "saved_at": 1792719850.4015715
+}
