@@ -58,7 +58,7 @@ import numpy as np
 import pandas as pd
 
 from cremad_human import ceiling, counts, empirical_split
-from preprocess_cremad import LABELS, clip_table
+from preprocess_cremad import KNOWN_BAD, LABELS, clip_table
 from probe_analysis import fit_softmax, predict
 from rq3_analysis import N_BOOT, Bootstrap, softmax
 from rq_analysis import auroc, markdown, spearman
@@ -296,7 +296,8 @@ def main() -> None:
         m = NAME.match(path.name)
         uids, arrays, meta = load_run(path)
         fold = None if m["fold"] is None else int(m["fold"])
-        expected = (df.fold == fold).sum() if fold is not None else len(df) - 4  # 4 known-bad clips
+        usable = ~df.index.isin(KNOWN_BAD)
+        expected = ((df.fold == fold) & usable).sum() if fold is not None else usable.sum()
         raw[path.name] = (m["model"], m["view"], fold, uids, arrays)
         checks.append({"run": path.name, "clips": len(uids), "expected (A0)": int(expected),
                        "grid": "grid" in arrays, "OOM": meta.get("oom_this_run")})
