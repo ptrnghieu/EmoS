@@ -3327,8 +3327,21 @@ T_START = time.time()
 
 VIEWS_DIR = os.environ.get("CREMAD_VIEWS_DIR")
 if VIEW != "A0" and VIEWS_DIR is None:
-    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "cremad_views/views.csv"))]
-    assert hits, "No cremad_views/views.csv under /kaggle/input: attach the output of prep_cremad_views.ipynb."
+    hits = [h for k in range(9) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "cremad_views/views.csv"))]
+    if not hits:  # attached as an archive that was not unpacked: unpack it outside the output folder
+        import zipfile
+        for z in (h for k in range(9) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "*.zip"))):
+            with zipfile.ZipFile(z) as zf:
+                names = [n for n in zf.namelist() if n.endswith("cremad_views/views.csv") or n == "views.csv"]
+                if names:
+                    print("unpacking", z, "(about a minute)")
+                    zf.extractall("/tmp/cremad_views_unzip")
+                    hits = [os.path.join("/tmp/cremad_views_unzip", names[0])]
+                    break
+    if not hits:
+        print("\n".join(sorted(glob.glob("/kaggle/input/*") + glob.glob("/kaggle/input/*/*") + glob.glob("/kaggle/input/*/*/*")
+                                + glob.glob("/kaggle/input/*/*/*/*"))[:60]))
+    assert hits, "No cremad_views/views.csv under /kaggle/input (folders above): attach the output of prep_cremad_views.ipynb."
     VIEWS_DIR = os.path.dirname(hits[0])
 VIEWS_DIR = Path(VIEWS_DIR) if VIEWS_DIR else None
 
