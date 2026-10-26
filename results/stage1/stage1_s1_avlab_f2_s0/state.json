@@ -1,0 +1,32 @@
+{
+ "arm": "s1_avlab",
+ "phase": "outer",
+ "fold": 2,
+ "seed": 0,
+ "lambdas": [
+  0.1,
+  0.5,
+  0.0
+ ],
+ "sizes": [
+  4988,
+  2450
+ ],
+ "epoch": 1,
+ "pos": 0,
+ "opt_step": 624,
+ "loss_sum": {},
+ "loss_n": 0,
+ "oom": 0,
+ "history": [
+  {
+   "epoch": 0,
+   "train_CE_AV": 1.0446560465262171,
+   "train_CE_V": 1.3330510812246747,
+   "train_CE_A": 1.1945755277490433,
+   "session_hours": 8.71
+  }
+ ],
+ "train_done": true,
+ "saved_at": 1792965534.3930283
+}

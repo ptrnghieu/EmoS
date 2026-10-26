@@ -13,6 +13,8 @@ U^AV = H(q_AV) / log 6 (the model's AV prediction); A^AV = normalised entropy of
     secondary    AUROC for the clips in the top quarter of A^AV, threshold from each fold's training actors;
                  Spearman within each intended emotion and within each sentence (with clip counts);
                  the V and A readings against the video-only and audio-only raters
+    ladder       s1_noI minus s1_avlab (per-modality labels vs extra readings with AV labels), s1 minus s1_noI
+                 (intensity), s1_avlab minus m3 (extra readings), paired as above
     references   two priors fitted on each fold's training actors and scored on its test actors:
                  emotion class + human perceived intensity (I^V, I^A), and the mean A^AV per (sentence, emotion)
 
@@ -132,7 +134,7 @@ def main() -> None:
         return row
 
     # ---- primary --------------------------------------------------------------------------------------
-    rows, diffs = [], []
+    rows, diffs, ladder = [], [], []
     for seed in seeds:
         for arm in ARMS:
             u = pooled(arm, seed)
@@ -157,10 +159,24 @@ def main() -> None:
                 d["stop rule met (CI above 0 and all folds positive)"] = bool(lo > 0 and all(x > 0 for x in per))
             d["_point"] = point
             diffs.append(d)
+    for seed in seeds:  # the ablation ladder: each step against the one below it
+        for a, b in (("s1_noI", "s1_avlab"), ("s1", "s1_noI"), ("s1_avlab", "m3")):
+            ua, ub = pooled(a, seed), pooled(b, seed)
+            if ua is None or ub is None:
+                continue
+            ua, ub = ua.reindex(uids).to_numpy(), ub.reindex(uids).to_numpy()
+            d = {"comparison": f"{a} minus {b}", "seed": seed,
+                 "pooled [95% CI]": boot(lambda i: spearman(ua[i], y[i]) - spearman(ub[i], y[i]))}
+            for f in folds:
+                sel = np.flatnonzero((fold_of.loc[uids] == f).to_numpy())
+                fb = Bootstrap(sub["video_id"].to_numpy()[sel], N_BOOT)
+                d[f"fold {f} [95% CI]"] = fb(lambda i, sel=sel: spearman(ua[sel][i], y[sel][i]) - spearman(ub[sel][i], y[sel][i]))
+            ladder.append(d)
     for name, u in ref.items():
         rows.append({"seed": "", **score_rows(name, u)})
     tables["primary_spearman"] = pd.DataFrame(rows)
     tables["primary_differences_vs_m3"] = pd.DataFrame(diffs).drop(columns="_point", errors="ignore")
+    tables["ablation_ladder"] = pd.DataFrame(ladder)
 
     # ---- within emotion and within sentence (seed 0) --------------------------------------------------
     for key, label in (("intended", "emotion"), ("sentence_code", "sentence")):
