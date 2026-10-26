@@ -3220,6 +3220,340 @@ if SCORES.exists():
 ]
 
 
+# ---- Experiment B (+ A): visual representations probed for the video-only raters' votes ---------------
+
+PREP_VIEWS = [
+    md(r"""
+# CREMA-D: extra visual views for the input ablation (Kaggle, CPU only)
+
+Adds two views next to the original frames (A0: 2 fps, longest side 448), for experiment A:
+- **A1**: 4 fps (twice the frames), same resolution;
+- **A2**: face crops at A0's timestamps, 336 x 336 (OpenCV face detector, one box per clip).
+A3 (full frames + face crops) reuses A0 and A2. The script is `analysis/preprocess_cremad_views.py` (with
+`preprocess_cremad.py`, whose download and frame functions it uses), written into the notebook below.
+
+**Running it**
+1. *Accelerator*: **None**; *Internet*: **on**; *Add input*: the output of `prep_cremad.ipynb` (`cremad_mm/`).
+2. **Save & Run All (Commit)**. About 1-2 hours (the videos are downloaded again). Clips that fail are marked
+   `error: ...`; commit again with this notebook's output attached to retry only those.
+3. Check `face_samples.jpg` (48 random crops; a red border = no face found, central crop) and the printed share of
+   frames with a detected face. The output folder `/kaggle/working/cremad_views/` (about 1.5 GB) is an input of
+   `probe_visual.ipynb` for A1-A3.
+"""),
+    code(r"""
+%pip install -q "opencv-python-headless==4.10.0.84"
+import shutil, subprocess
+if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+    subprocess.run("apt-get update -qq && apt-get install -y -qq ffmpeg", shell=True, check=True)
+"""),
+    code("%%writefile preprocess_cremad.py\n" + (HERE.parent / "analysis" / "preprocess_cremad.py").read_text(encoding="utf-8")),
+    code("%%writefile preprocess_cremad_views.py\n" + (HERE.parent / "analysis" / "preprocess_cremad_views.py").read_text(encoding="utf-8")),
+    code(r"""
+import glob, os
+manifest = [h for k in range(6) for h in glob.glob("/kaggle/input/" + "*/" * k + "cremad_mm/manifest.csv")][0]
+# resume: copy an earlier run of this notebook (attached as input) into the working folder
+for src in [h for k in range(6) for h in glob.glob("/kaggle/input/" + "*/" * k + "cremad_views")]:
+    if not os.path.exists("/kaggle/working/cremad_views"):
+        shutil.copytree(src, "/kaggle/working/cremad_views")
+        print("copied earlier run from", src)
+print("A0 manifest:", manifest)
+"""),
+    code(r"""
+!python preprocess_cremad_views.py --manifest {manifest} --out-dir /kaggle/working/cremad_views --workers 16
+"""),
+    code(r"""
+from IPython.display import Image, display
+display(Image("/kaggle/working/cremad_views/face_samples.jpg"))
+print(subprocess.run(["du", "-sh", "/kaggle/working/cremad_views"], capture_output=True, text=True).stdout)
+"""),
+]
+
+PROBE_VISUAL = [
+    md(r"""
+# Experiment B (+ A): visual representations of Qwen2.5-Omni-7B for the video-only raters' votes (Kaggle, 2× T4)
+
+Is what makes a face hard to read for people (the video-only raters' disagreement, A^V) decodable from the model's
+representations, and where? Each clip is read once under **video only** (the prompt of the zero-shot and Stage 1
+runs, unchanged) and three places are saved:
+
+1. **vision encoder output** (`vis`): the visual tokens as handed to the language model, averaged over tokens;
+   with `SAVE_GRID`, also pooled to a `GRID` x `GRID` grid per temporal patch (for the attention-pooling probe);
+2. **visual tokens inside the language model** (`vid7`, `vid14`, `vid21`, `vid28`): the residual stream at the
+   video-token positions after those layers, averaged over tokens;
+3. **the answer position** (`last7` ... `last28`, `norm`): the residual stream at the last position (the one the label
+   is read from), after those layers and after the final norm (the input of the language-model head),
+
+plus the six label logits (the model's own prediction). Probes are trained on a CPU (`analysis/visual_probe_analysis.py`).
+
+**Settings** (config cell)
+- `MODEL_KIND`: `base` (zero-shot; main result; every clip) or `m3` / `s1_noI` (Stage 1 adapters, seed 0; only the
+  actors of fold `FOLD`, which that adapter never saw in training).
+- `VIEW`: `A0` (2 fps, full frame; as in all runs so far), `A1` (4 fps), `A2` (face crops), `A3` (full frames + face
+  crops, as two videos). The adapters are read with `A0` only.
+
+**Running it**
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: the output of `prep_cremad.ipynb` (`cremad_mm/`);
+   for `A1`-`A3` also the output of `prep_cremad_views.ipynb` (`cremad_views/`); for `m3` / `s1_noI` the output of
+   the Stage 1 notebook run `stage1_<MODEL_KIND>_f<FOLD>_s0` (it holds `last/adapter.pt`).
+2. First set `LIMIT = 10` and run all interactively; send the progress lines.
+3. **Save & Run All (Commit)** with `LIMIT = None`. If it stops at `TIME_BUDGET_H`, add this notebook's own output as
+   an input and commit again: finished clips are skipped.
+4. Results: `/kaggle/working/<RUN_NAME>/`: `shard_*.npz` and `meta.json`. About 0.6 GB per run (base `A0` with the
+   grid: about 3 GB).
+"""),
+    code(r"""
+# peft added for LoRA; the rest as in the other notebooks.
+%pip install -q "transformers==5.20.1" "qwen-omni-utils==0.0.9" "peft==0.21.2" audioread librosa
+# Kaggle ships torchao 0.10; peft 0.21 raises an ImportError for torchao < 0.16 even when it is not used.
+%pip uninstall -y -q torchao
+"""),
+    code(COMMON_CONFIG + CREMAD_DATA + r"""
+MODEL_KIND = os.environ.get("MODEL_KIND", "base")  # base | m3 | s1_noI
+FOLD = int(os.environ.get("FOLD", 0))              # m3 / s1_noI: the outer fold whose actors are read
+VIEW = os.environ.get("VIEW", "A0")                # A0 | A1 | A2 | A3
+SAVE_GRID = MODEL_KIND == "base" and VIEW == "A0"  # token grid for the attention-pooling probe
+GRID = 4                     # GRID x GRID cells per temporal patch
+N_OUTER, SPLIT_SEED = 3, 0   # the Stage 1 folds
+LORA_R, LORA_ALPHA, LORA_DROPOUT = 16, 32, 0.05
+LORA_TARGETS = r"^model\.layers\.\d+\.self_attn\.(q|k|v|o)_proj$"
+SHARD = 250
+TIME_BUDGET_H = 11.0
+LIMIT = None                 # e.g. 10 for a quick check
+assert MODEL_KIND in ("base", "m3", "s1_noI") and VIEW in ("A0", "A1", "A2", "A3") and 0 <= FOLD < N_OUTER
+assert MODEL_KIND == "base" or VIEW == "A0", "the adapters were trained on A0 and are read with A0 only"
+RUN_NAME = f"vprobe_{MODEL_KIND}_{VIEW}" + ("" if MODEL_KIND == "base" else f"_f{FOLD}")
+OUT_DIR = Path(os.environ.get("OUT_DIR", f"/kaggle/working/{RUN_NAME}"))
+T_START = time.time()
+
+VIEWS_DIR = os.environ.get("CREMAD_VIEWS_DIR")
+if VIEW != "A0" and VIEWS_DIR is None:
+    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "cremad_views/views.csv"))]
+    assert hits, "No cremad_views/views.csv under /kaggle/input: attach the output of prep_cremad_views.ipynb."
+    VIEWS_DIR = os.path.dirname(hits[0])
+VIEWS_DIR = Path(VIEWS_DIR) if VIEWS_DIR else None
+
+ADAPTER = None
+if MODEL_KIND != "base":
+    ADAPTER = os.environ.get("ADAPTER")
+    if ADAPTER is None:
+        name = f"stage1_{MODEL_KIND}_f{FOLD}_s0"
+        hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + f"{name}/last/adapter.pt"))]
+        assert hits, f"No {name}/last/adapter.pt under /kaggle/input: attach the output of that Stage 1 run."
+        ADAPTER = hits[0]
+    st = json.loads((Path(ADAPTER).parent.parent / "state.json").read_text())
+    assert (st["arm"], st["phase"], st["fold"], st["seed"], st["train_done"]) == (MODEL_KIND, "outer", FOLD, 0, True), st
+print("run:", RUN_NAME, "| adapter:", ADAPTER, "| views:", VIEWS_DIR, "| grid:", SAVE_GRID)
+""" + COMMON_REPORT),
+    md(r"""
+## Load the model (and the Stage 1 adapter)
+
+Inference only, fp16. Hooks: the vision encoder's output (the merged visual tokens, in raster order), the residual
+stream after each layer in `LAYERS` (at the video-token positions, averaged, and at the last position) and the final
+norm at the last position. The LoRA adapters touch only the language model's attention, so `vis` is the same for
+every model (a check).
+"""),
+    code(r"""
+from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
+from qwen_omni_utils import process_mm_info
+from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniThinkerForConditionalGeneration
+
+ON_GPU = torch.cuda.is_available()
+processor = Qwen2_5OmniProcessor.from_pretrained(MODEL_ID)
+kwargs = dict(dtype=torch.float16 if ON_GPU else torch.float32, attn_implementation="sdpa")
+if ON_GPU:
+    kwargs.update(device_map="auto", max_memory=MAX_MEMORY)
+t0 = time.time()
+base = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(MODEL_ID, **kwargs).eval()
+print(f"loaded in {time.time() - t0:.0f} s")
+base.lm_head.register_forward_pre_hook(lambda module, args: (args[0][:, -1:],) + args[1:])
+model = base
+if ADAPTER:
+    model = get_peft_model(base, LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
+                                            target_modules=LORA_TARGETS, bias="none"))
+    result = set_peft_model_state_dict(model, torch.load(ADAPTER, map_location="cpu"))
+    assert not [k for k in result.unexpected_keys if "lora" in k], result.unexpected_keys
+    model.eval()
+
+VIDEO_ID = base.config.video_token_id
+MERGE = base.visual.spatial_merge_size
+layers = base.model.layers
+n = len(layers)
+LAYERS = sorted({max(1, n // 4), max(1, n // 2), max(1, 3 * n // 4), n})  # after layer i (1-based), as in probe_hidden
+HIDDEN, MASK = {}, {}
+
+
+def on_visual(module, args, out):
+    merged = out.pooler_output if hasattr(out, "pooler_output") else out[1]
+    HIDDEN["visual"] = merged.detach().float()  # copied now: the caller later replaces pooler_output by a split
+
+
+def on_layer(module, args, out, i):
+    h = (out[0] if isinstance(out, tuple) else out)[0]
+    HIDDEN[f"vid{i}"] = h[MASK["video"].to(h.device)].float().mean(0).cpu()
+    HIDDEN[f"last{i}"] = h[-1].float().cpu()
+
+
+base.visual.register_forward_hook(on_visual)
+for i in LAYERS:
+    layers[i - 1].register_forward_hook(lambda mod, args, out, i=i: on_layer(mod, args, out, i))
+base.model.norm.register_forward_hook(lambda mod, args, out: HIDDEN.__setitem__("norm", out[0, -1].float().cpu()))
+print("layers:", n, "| saved after:", LAYERS, "+ norm | video token id:", VIDEO_ID)
+"""),
+    md("## Prompt (as in the zero-shot CREMA-D run; video only)"),
+    "PROMPT_PLACEHOLDER",
+    md(r"""
+## Clips and views
+
+`base`: every clip. `m3` / `s1_noI`: the actors of outer fold `FOLD` (the Stage 1 folds, rebuilt with the same seed).
+For `A1`-`A3`, clips whose extra view failed are left out (counted below). Every view uses the same text and the same
+per-frame pixel cap; `A3` passes the full frames and the face crops as two videos, in that order.
+"""),
+    code(r"""
+manifest = pd.read_csv(DATA_DIR / "manifest.csv", dtype={"video_id": str})
+clips = manifest[manifest["status"] == "ok"].reset_index(drop=True)
+rng = np.random.default_rng(SPLIT_SEED)
+actor_sex = clips.groupby("actor")["Sex"].first()
+outer = {}
+for _, group in actor_sex.groupby(actor_sex):
+    for k, a in enumerate(rng.permutation(group.index.to_numpy())):
+        outer[int(a)] = k % N_OUTER
+clips["outer_fold"] = clips["actor"].map(outer)
+if MODEL_KIND != "base":
+    clips = clips[clips["outer_fold"] == FOLD].reset_index(drop=True)
+if VIEW != "A0":
+    views = pd.read_csv(VIEWS_DIR / "views.csv")
+    usable = views[views["status"].isin(["ok", "face_fallback"])]
+    print(f"extra view missing for {int((~clips['uid'].isin(usable['uid'])).sum())} clips (left out)")
+    clips = clips.merge(usable.drop(columns="status"), on="uid")
+if LIMIT:
+    clips = clips.head(LIMIT)
+print(f"{len(clips)} clips, {clips['actor'].nunique()} actors, folds {sorted(clips['outer_fold'].unique())}")
+
+
+def video(folder, fps):
+    frames = sorted(glob.glob(str(folder / "*.jpg")))
+    assert frames, folder
+    return {"type": "video", "video": [f"file://{f}" for f in frames], "sample_fps": float(fps), "max_pixels": FRAME_MAX_PIXELS}
+
+
+def view_messages(row):
+    full = lambda: video(DATA_DIR / row["frames_dir"], row["sample_fps"])
+    faces = lambda: video(VIEWS_DIR / row["faces_dir"], row["sample_fps"])  # A0's timestamps
+    vids = {"A0": lambda: [full()], "A1": lambda: [video(VIEWS_DIR / row["frames4_dir"], row["sample_fps4"])],
+            "A2": lambda: [faces()], "A3": lambda: [full(), faces()]}[VIEW]()
+    msgs = build_messages(row, "V")
+    msgs[1]["content"] = vids + [c for c in msgs[1]["content"] if c["type"] != "video"]
+    return msgs
+
+
+row0 = clips.iloc[0]
+if VIEW == "A0":
+    assert view_messages(row0) == build_messages(row0, "V")  # A0 is exactly the earlier video-only input
+print(json.dumps(view_messages(row0)[1]["content"][-1]))
+"""),
+    md(r"""
+## Read every clip and save shards
+
+Per clip: `vis`, `vid*`, `last*`, `norm` (float16), the six label logits and the log-sum-exp, the number of video
+tokens, and with `SAVE_GRID` the token grid (stored flat per shard, with `grid_len` tokens per clip). Shards found
+under `/kaggle/input` (an earlier run of this notebook with the same `RUN_NAME`) or in `OUT_DIR` are kept and their
+clips skipped.
+"""),
+    code(r"""
+import torch.nn.functional as F
+
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+for p in (h for k in range(6) for h in glob.glob("/kaggle/input/" + "*/" * k + f"{RUN_NAME}/shard_*.npz")):
+    if not (OUT_DIR / Path(p).name).exists():
+        shutil.copy(p, OUT_DIR / Path(p).name)
+done = set()
+for p in sorted(OUT_DIR.glob("shard_*.npz")):
+    done |= set(np.load(p, allow_pickle=False)["uid"].tolist())
+todo = clips[~clips["uid"].isin(done)]
+print(f"{len(clips)} clips, {len(done & set(clips['uid']))} already done, {len(todo)} to run")
+
+
+def grid_tokens(merged, thw):
+    # merged: (tokens, d) for all videos, raster order per video: t, h / MERGE, w / MERGE
+    out, start = [], 0
+    for t, h, w in thw.tolist():
+        hh, ww = h // MERGE, w // MERGE
+        x = merged[start:start + t * hh * ww].reshape(t, hh, ww, -1).permute(0, 3, 1, 2)
+        out.append(F.adaptive_avg_pool2d(x, GRID).permute(0, 2, 3, 1).reshape(t * GRID * GRID, -1))
+        start += t * hh * ww
+    assert start == len(merged)
+    return torch.cat(out).cpu().numpy().astype(np.float16)
+
+
+@torch.inference_mode()
+def read(row):
+    inputs = prepare(view_messages(row))
+    HIDDEN.clear()
+    MASK["video"] = inputs["input_ids"][0] == VIDEO_ID
+    logits = model(**inputs, use_cache=False).logits[0, -1].float()
+    merged = HIDDEN.pop("visual")
+    assert len(merged) == int(MASK["video"].sum()), "video tokens and vision encoder output differ in number"
+    rec = {k: v.numpy().astype(np.float16) for k, v in HIDDEN.items()}
+    rec.update(vis=merged.mean(0).cpu().numpy().astype(np.float16), logits=logits[label_first_ids].cpu().numpy(),
+               lse=np.float32(torch.logsumexp(logits, -1).item()), n_video_tokens=np.int32(len(merged)))
+    if SAVE_GRID:
+        rec["grid"] = grid_tokens(merged, inputs["video_grid_thw"])
+    return rec
+
+
+buf, n_oom, t_run = [], 0, time.time()
+
+
+def flush():
+    if not buf:
+        return
+    k = len(list(OUT_DIR.glob("shard_*.npz")))
+    arrays = {"uid": np.array([b["uid"] for b in buf])}
+    for key in buf[0]:
+        if key == "grid":
+            arrays["grid"] = np.concatenate([b["grid"] for b in buf])
+            arrays["grid_len"] = np.array([len(b["grid"]) for b in buf], np.int32)
+        elif key != "uid":
+            arrays[key] = np.stack([b[key] for b in buf])
+    np.savez(OUT_DIR / f"shard_{k:03d}.npz", **arrays)
+    buf.clear()
+
+
+for j, (_, row) in enumerate(todo.iterrows()):
+    if (time.time() - T_START) / 3600 > TIME_BUDGET_H:
+        print("stopped at the time budget: add this notebook's output as an input and commit again")
+        break
+    try:
+        buf.append({"uid": row["uid"], **read(row)})
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        n_oom += 1
+    if len(buf) == SHARD:
+        flush()
+    if j + 1 in (5, 50) or (j + 1) % 500 == 0:
+        sec = (time.time() - t_run) / (j + 1)
+        peak = max([torch.cuda.max_memory_allocated(d) / 2**30 for d in range(torch.cuda.device_count())] or [0])
+        print(f"{j + 1}/{len(todo)} | {sec:.2f} s/clip, about {(len(todo) - j - 1) * sec / 3600:.1f} h left | "
+              f"video tokens {buf[-1]['n_video_tokens'] if buf else '-'} | peak {peak:.1f} GiB | OOM {n_oom}")
+flush()
+(OUT_DIR / "meta.json").write_text(json.dumps({
+    "model": MODEL_ID, "model_kind": MODEL_KIND, "fold": FOLD if MODEL_KIND != "base" else None, "view": VIEW,
+    "adapter": ADAPTER, "layers": LAYERS, "labels": LABELS, "grid": GRID if SAVE_GRID else None,
+    "frame_max_pixels": FRAME_MAX_PIXELS, "oom_this_run": n_oom}, indent=1))
+"""),
+    md("## Check"),
+    code(r"""
+saved, tokens = set(), []
+for p in sorted(OUT_DIR.glob("shard_*.npz")):
+    z = np.load(p, allow_pickle=False)
+    saved |= set(z["uid"].tolist())
+    tokens += z["n_video_tokens"].tolist()
+print(f"{len(saved & set(clips['uid']))} of {len(clips)} clips saved | arrays:", {k: z[k].shape[1:] for k in z.files})
+print("video tokens per clip: median", int(np.median(tokens)), "| range", min(tokens), "-", max(tokens))
+"""),
+]
+
+
 if __name__ == "__main__":
     write(HERE / "benchmark_qwen25_omni.ipynb", BENCHMARK)
     write(HERE / "run_qwen25_omni.ipynb", RUN)
@@ -3237,3 +3571,5 @@ if __name__ == "__main__":
     write(HERE / "cremad_minicpm.ipynb", CREMAD_MINICPM)
     write(HERE / "cremad_lora.ipynb", cremad_lora_cells())
     write(HERE / "stage1_cremad.ipynb", [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in STAGE1])
+    write(HERE / "prep_cremad_views.ipynb", PREP_VIEWS)
+    write(HERE / "probe_visual.ipynb", [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in PROBE_VISUAL])

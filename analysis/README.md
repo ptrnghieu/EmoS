@@ -76,6 +76,12 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
     common to all runs are the test actors').
 13. **Stage 1** (CREMA-D, per-condition supervision): `kaggle/stage1_cremad.ipynb`, one committed version per
     (`ARM`, `PHASE`, `FOLD`, `SEED`, lambdas); copy each `stage1_*` output folder to `results/stage1/`.
+14. **Experiment B (+ A): visual probe** (CREMA-D, video only). For A1-A3, first `kaggle/prep_cremad_views.ipynb`
+    (CPU, with `cremad_mm/` attached) writes `cremad_views/` (4 fps frames, face crops; `preprocess_cremad_views.py`).
+    Then `kaggle/probe_visual.ipynb` once per run: `MODEL_KIND = base` with `VIEW` = `A0`, `A1`, `A2`, `A3`;
+    `MODEL_KIND` = `m3` / `s1_noI` with `FOLD` = 0, 1, 2 (view `A0`, the Stage 1 run's output attached). Copy each
+    `vprobe_*` folder to `results/visual_probe/`, then run `visual_probe_analysis.py` (needs torch for the
+    attention-pooling probe; about 2-3 hours on 4 cores).
 
 ## Note on clip ids
 
