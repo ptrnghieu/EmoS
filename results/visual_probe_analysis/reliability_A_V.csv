@@ -1,0 +1,6 @@
+quantity,value
+"split-half: Spearman between the entropies of two random halves of each clip's raters (50 splits), mean [2.5%, 97.5%]","0.451 [0.438, 0.461]"
+"DM check: about 7 raters predict the other 3, empirical",0.4
+"DM check: the same, simulated from the fitted Dirichlet-multinomial (mean)",0.341
+"DM ceiling: Spearman of a perfect predictor with the observed A^V (mean [2.5%, 97.5%]); valid as far as the DM check holds","0.756 [0.747, 0.765]"
+clips / raters per clip (median),7442 / 10

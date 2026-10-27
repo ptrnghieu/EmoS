@@ -1,0 +1,11 @@
+run,clips,expected (A0),grid,OOM,clips vs earlier run,median |logit diff|,same top label
+vprobe_base_A0,7438,7438,True,0,7438.0,0.0,1.0
+vprobe_base_A1,7438,7438,False,0,,,
+vprobe_base_A2,7438,7438,False,0,,,
+vprobe_base_A3,7438,7438,False,0,,,
+vprobe_m3_A0_f0,2540,2540,False,0,2540.0,0.0,1.0
+vprobe_m3_A0_f1,2448,2448,False,0,2448.0,0.0,1.0
+vprobe_m3_A0_f2,2450,2450,False,0,2450.0,0.0,1.0
+vprobe_s1_noI_A0_f0,2540,2540,False,0,2540.0,0.0,1.0
+vprobe_s1_noI_A0_f1,2448,2448,False,0,2448.0,0.0,1.0
+vprobe_s1_noI_A0_f2,2450,2450,False,0,2450.0,0.0,1.0
