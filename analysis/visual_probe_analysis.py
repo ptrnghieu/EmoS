@@ -205,8 +205,14 @@ def attention_oof(tokens: list, Y: np.ndarray, actors: np.ndarray, folds: np.nda
     def train(rows, val, wd, mu, sd, epochs=40, patience=5):
         head = Head()
         opt = torch.optim.Adam(head.parameters(), lr=1e-3)
-        xv, mv = batch(val, mu, sd)
-        yv = torch.from_numpy(Y[val]).float()
+        def val_loss():  # in chunks, to keep memory low
+            total = 0.0
+            for k in range(0, len(val), 128):
+                x, m = batch(val[k:k + 128], mu, sd)
+                y = torch.from_numpy(Y[val[k:k + 128]]).float()
+                total += float(-(y * torch.log_softmax(head(x, m), -1)).sum(-1).sum())
+            return total / len(val)
+
         best, state, bad = np.inf, None, 0
         rng = np.random.default_rng(seed)
         for _ in range(epochs):
@@ -219,7 +225,7 @@ def attention_oof(tokens: list, Y: np.ndarray, actors: np.ndarray, folds: np.nda
                 loss.backward()
                 opt.step()
             with torch.no_grad():
-                v = float(-(yv * torch.log_softmax(head(xv, mv), -1)).sum(-1).mean())
+                v = val_loss()
             if v < best - 1e-4:
                 best, state, bad = v, {k: t.clone() for k, t in head.state_dict().items()}, 0
             else:
@@ -231,9 +237,14 @@ def attention_oof(tokens: list, Y: np.ndarray, actors: np.ndarray, folds: np.nda
 
     chosen = []
     for j, (tr, te) in enumerate(splits(actors, folds, "P1")):
-        allv = np.concatenate([tokens[i] for i in tr]).astype(np.float32)
-        mu, sd = allv.mean(0), allv.std(0) + 1e-6
-        del allv
+        s1, s2, n = np.zeros(d), np.zeros(d), 0  # token mean and SD over the training clips, accumulated
+        for i in tr:
+            t = tokens[i].astype(np.float64)
+            s1 += t.sum(0)
+            s2 += (t ** 2).sum(0)
+            n += len(t)
+        mu = (s1 / n).astype(np.float32)
+        sd = (np.sqrt(np.maximum(s2 / n - (s1 / n) ** 2, 0)) + 1e-6).astype(np.float32)
         held = inner_holdout(actors[tr], seed=100 + j)
         fits = [(train(tr[~held], tr[held], wd, mu, sd), wd) for wd in (1e-4, 1e-3, 1e-2)]
         (head, _), wd = min(fits, key=lambda f: f[0][1])
@@ -360,6 +371,10 @@ def main() -> None:
     with ProcessPoolExecutor(args.workers, mp_context=multiprocessing.get_context("fork")) as pool:  # workers share DATA
         for n_done, (key, P, lams) in enumerate(pool.map(_job, jobs), 1):
             oof[key] = (P, lams)
+    feats_of = {key: features(key) for key in DATA}
+    for d in DATA.values():  # the fitted features are no longer needed: free them before the attention probe
+        for f in [f for f in d["arrays"] if f not in ("logits", "grid")]:
+            del d["arrays"][f]
             print(f"  {n_done}/{len(jobs)} {key}: lambdas {lams}", flush=True)
 
     # ---- metrics --------------------------------------------------------------------------------------
@@ -393,7 +408,7 @@ def main() -> None:
                      "emotion x sentence prior": prior_oof(df.A_V.to_numpy()[i0], (df.intended + df.sentence_code).to_numpy()[i0],
                                                            d["actors"], d["folds"], protocol)}
             ce = {}
-            for f in features(key):
+            for f in feats_of[key]:
                 P, _ = oof[(key, f, protocol)]
                 name = "logits (recalibrated)" if f == "logits" else f"probe: {f}"
                 preds[name] = norm_entropy(P)
