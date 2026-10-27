@@ -69,6 +69,7 @@ N_OUTER, SPLIT_SEED, INNER_SHARE, N_INNER_CV = 3, 0, 0.15, 5
 NAME = re.compile(r"vprobe_(?P<model>base|m3|s1_noI)_(?P<view>A[0-3])(_f(?P<fold>\d))?$")
 PRIMARY = "norm"
 DATA: dict = {}  # filled before the worker pool forks
+CACHE: list = [None]
 
 
 def norm_entropy(p: np.ndarray) -> np.ndarray:
@@ -154,9 +155,14 @@ def probe_oof(X: np.ndarray, Y: np.ndarray, actors: np.ndarray, folds: np.ndarra
 
 def _job(key):
     run, feature, protocol = key
+    cache = CACHE[0] / f"{run}__{feature}__{protocol}.npz"
+    if cache.exists():  # finished in an earlier run of this script
+        z = np.load(cache)
+        return key, z["P"], z["lams"].tolist()
     d = DATA[run]
     X = d["arrays"][feature].astype(np.float32)
     P, lams = probe_oof(X, d["Y"], d["actors"], d["folds"], protocol)
+    np.savez(cache, P=P, lams=np.array(lams))
     return key, P, lams
 
 
@@ -342,6 +348,8 @@ def main() -> None:
         DATA[key] = {"uids": uids, "idx": idx, "arrays": arrays, "Y": pV[idx].astype(np.float32),
                      "actors": df.actor.to_numpy()[idx], "folds": df.fold.to_numpy()[idx]}
 
+    CACHE[0] = args.out / "probe_cache"  # out-of-fold predictions per fit, reused when the script is rerun
+    CACHE[0].mkdir(exist_ok=True)
     features = lambda key: [k for k in DATA[key]["arrays"] if k != "grid"]
     jobs = []
     for key in DATA:

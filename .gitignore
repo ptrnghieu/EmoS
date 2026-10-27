@@ -30,3 +30,4 @@ Thumbs.db
 # Python bytecode
 __pycache__/
 *.pyc
+results/visual_probe_analysis/probe_cache/
