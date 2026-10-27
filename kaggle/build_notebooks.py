@@ -3290,6 +3290,8 @@ plus the six label logits (the model's own prediction). Probes are trained on a 
   actors of fold `FOLD`, which that adapter never saw in training).
 - `VIEW`: `A0` (2 fps, full frame; as in all runs so far), `A1` (4 fps), `A2` (face crops), `A3` (full frames + face
   crops, as two videos). The adapters are read with `A0` only.
+- `CONDITION`: `V` (video only; experiment B) or `AV` (video + audio, the prompt of the Stage 1 AV reading; for the
+  Stage C readouts B0-B2 on the adapters' AV states). `AV` runs are named `vprobe_<MODEL_KIND>_A0_AV_f<FOLD>`.
 
 **Running it**
 1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: the output of `prep_cremad.ipynb` (`cremad_mm/`);
@@ -3311,7 +3313,8 @@ plus the six label logits (the model's own prediction). Probes are trained on a 
 MODEL_KIND = os.environ.get("MODEL_KIND", "base")  # base | m3 | s1_noI
 FOLD = int(os.environ.get("FOLD", 0))              # m3 / s1_noI: the outer fold whose actors are read
 VIEW = os.environ.get("VIEW", "A0")                # A0 | A1 | A2 | A3
-SAVE_GRID = MODEL_KIND == "base" and VIEW == "A0"  # token grid for the attention-pooling probe
+CONDITION = os.environ.get("CONDITION", "V")       # V: video only (experiment B) | AV: video + audio (Stage C readouts)
+SAVE_GRID = MODEL_KIND == "base" and VIEW == "A0" and CONDITION == "V"  # token grid for the attention-pooling probe
 GRID = 4                     # GRID x GRID cells per temporal patch
 N_OUTER, SPLIT_SEED = 3, 0   # the Stage 1 folds
 LORA_R, LORA_ALPHA, LORA_DROPOUT = 16, 32, 0.05
@@ -3321,7 +3324,8 @@ TIME_BUDGET_H = 11.0
 LIMIT = None                 # e.g. 10 for a quick check
 assert MODEL_KIND in ("base", "m3", "s1_noI") and VIEW in ("A0", "A1", "A2", "A3") and 0 <= FOLD < N_OUTER
 assert MODEL_KIND == "base" or VIEW == "A0", "the adapters were trained on A0 and are read with A0 only"
-RUN_NAME = f"vprobe_{MODEL_KIND}_{VIEW}" + ("" if MODEL_KIND == "base" else f"_f{FOLD}")
+assert CONDITION in ("V", "AV") and (CONDITION == "V" or VIEW == "A0"), "AV is read with A0 only"
+RUN_NAME = f"vprobe_{MODEL_KIND}_{VIEW}" + ("_AV" if CONDITION == "AV" else "") + ("" if MODEL_KIND == "base" else f"_f{FOLD}")
 OUT_DIR = Path(os.environ.get("OUT_DIR", f"/kaggle/working/{RUN_NAME}"))
 T_START = time.time()
 
@@ -3454,14 +3458,14 @@ def view_messages(row):
     faces = lambda: video(VIEWS_DIR / row["faces_dir"], row["sample_fps"])  # A0's timestamps
     vids = {"A0": lambda: [full()], "A1": lambda: [video(VIEWS_DIR / row["frames4_dir"], row["sample_fps4"])],
             "A2": lambda: [faces()], "A3": lambda: [full(), faces()]}[VIEW]()
-    msgs = build_messages(row, "V")
+    msgs = build_messages(row, CONDITION)
     msgs[1]["content"] = vids + [c for c in msgs[1]["content"] if c["type"] != "video"]
     return msgs
 
 
 row0 = clips.iloc[0]
 if VIEW == "A0":
-    assert view_messages(row0) == build_messages(row0, "V")  # A0 is exactly the earlier video-only input
+    assert view_messages(row0) == build_messages(row0, CONDITION)  # A0 is exactly the earlier input of this condition
 print(json.dumps(view_messages(row0)[1]["content"][-1]))
 """),
     md(r"""
@@ -3550,7 +3554,7 @@ for j, (_, row) in enumerate(todo.iterrows()):
               f"video tokens {buf[-1]['n_video_tokens'] if buf else '-'} | peak {peak:.1f} GiB | OOM {n_oom}")
 flush()
 (OUT_DIR / "meta.json").write_text(json.dumps({
-    "model": MODEL_ID, "model_kind": MODEL_KIND, "fold": FOLD if MODEL_KIND != "base" else None, "view": VIEW,
+    "model": MODEL_ID, "model_kind": MODEL_KIND, "fold": FOLD if MODEL_KIND != "base" else None, "view": VIEW, "condition": CONDITION,
     "adapter": ADAPTER, "layers": LAYERS, "labels": LABELS, "grid": GRID if SAVE_GRID else None,
     "frame_max_pixels": FRAME_MAX_PIXELS, "oom_this_run": n_oom}, indent=1))
 """),

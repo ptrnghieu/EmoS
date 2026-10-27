@@ -82,6 +82,9 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
     `MODEL_KIND` = `m3` / `s1_noI` with `FOLD` = 0, 1, 2 (view `A0`, the Stage 1 run's output attached). Copy each
     `vprobe_*` folder to `results/visual_probe/`, then run `visual_probe_analysis.py` (needs torch for the
     attention-pooling probe; about 2-3 hours on 4 cores).
+15. **Stage C readouts (B0-B2)**: `kaggle/probe_visual.ipynb` with `MODEL_KIND = m3`, `CONDITION = AV`, `FOLD` = 0, 1, 2
+    (the Stage 1 run's output attached); copy the `vprobe_m3_A0_AV_f*` folders to `results/visual_probe/`, then run
+    `ambiguity_readout.py`.
 
 ## Note on clip ids
 
