@@ -1,0 +1,4 @@
+run,clips,expected,condition (meta),clips vs Stage 1 AV scores,median |logit diff|,same top label
+vprobe_m3_A0_AV_f0,2540,2542,AV,2540,0.0,1.0
+vprobe_m3_A0_AV_f1,2448,2448,AV,2448,0.0,1.0
+vprobe_m3_A0_AV_f2,2450,2452,AV,2450,0.0,1.0
