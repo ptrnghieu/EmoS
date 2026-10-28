@@ -2865,13 +2865,21 @@ actors of fold `FOLD`, hold out 15% of actors and score those instead; the outer
 %pip uninstall -y -q torchao
 """),
     code(COMMON_CONFIG + CREMAD_DATA + r"""
-ARM = os.environ.get("ARM", "s1")            # m3 | s1 | s1_noI | s1_avlab
+ARM = os.environ.get("ARM", "s1")            # m3 | s1 | s1_noI | s1_avlab | s3 | s3_frozenvis | s3_norank | s3_noV
 PHASE = os.environ.get("PHASE", "outer")     # outer: score the outer fold | inner: lambda search on held-out training actors
 FOLD = int(os.environ.get("FOLD", 0))        # outer fold, 0..N_OUTER-1
 SEED = int(os.environ.get("SEED", 0))
-LAMBDA_V = float(os.environ.get("LAMBDA_V", 0.25))
+VIEW = os.environ.get("VIEW", "A0")          # A0: 2 fps (Stage 1) | A1: 4 fps (needs the output of prep_cremad_views.ipynb)
+S3 = ARM.startswith("s3")
+LAMBDA_V = float(os.environ.get("LAMBDA_V", 0.1 if S3 else 0.25))
 LAMBDA_A = float(os.environ.get("LAMBDA_A", 0.25))
-LAMBDA_I = 0.0 if ARM in ("m3", "s1_noI", "s1_avlab") else float(os.environ.get("LAMBDA_I", 0.1))
+LAMBDA_I = 0.0 if ARM in ("m3", "s1_noI", "s1_avlab") or S3 else float(os.environ.get("LAMBDA_I", 0.1))
+# Stage 3: ranking loss on an ambiguity head (AV reading), weight chosen on the inner split of fold 0 from {0.1, 0.5}
+LAMBDA_AMB = float(os.environ.get("LAMBDA_AMB", 0.1)) if ARM in ("s3", "s3_frozenvis", "s3_noV") else 0.0
+TRAIN_VISUAL = ARM in ("s3", "s3_norank", "s3_noV")  # train the merger + LoRA on the last VIS_BLOCKS vision blocks
+VIS_BLOCKS, MERGER_LR = 8, 1e-5
+RANK_DELTA, RANK_QUEUE, MIN_SENTENCE_PAIRS = 0.15, 256, 8  # pairs: same emotion, |A_i - A_j| >= RANK_DELTA; same
+                                                          # sentence too when at least MIN_SENTENCE_PAIRS of them exist
 N_OUTER, INNER_VAL_SHARE, SPLIT_SEED = 3, 0.15, 0
 LORA_R, LORA_ALPHA, LORA_DROPOUT = 16, 32, 0.05
 LORA_TARGETS = r"^model\.layers\.\d+\.self_attn\.(q|k|v|o)_proj$"
@@ -2883,13 +2891,35 @@ CKPT_EVERY = 200
 TRAIN_MAX_MEMORY = {0: "10GiB", 1: "14GiB"}
 TIME_BUDGET_H = 11.0
 LIMIT = None                 # e.g. 10 for a quick check: 10 training clips and 10 scored clips
-assert ARM in ("m3", "s1", "s1_noI", "s1_avlab") and PHASE in ("outer", "inner") and 0 <= FOLD < N_OUTER
-TRAIN_CONDS = ("AV",) if ARM == "m3" else ("AV", "V", "A")
-RUN_NAME = f"stage1_{ARM}_f{FOLD}_s{SEED}" + (f"_inner_v{LAMBDA_V:g}_a{LAMBDA_A:g}" if PHASE == "inner" else "")
+assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "s3", "s3_frozenvis", "s3_norank", "s3_noV")
+assert PHASE in ("outer", "inner") and 0 <= FOLD < N_OUTER and VIEW in ("A0", "A1")
+TRAIN_CONDS = ("AV",) if ARM in ("m3", "s3_noV") else ("AV", "V") if S3 else ("AV", "V", "A")
+STAGE3 = S3 or VIEW != "A0"
+SCORE_CONDS = ("AV", "V") if STAGE3 else ("AV", "V", "A")
+if STAGE3:
+    RUN_NAME = f"stage3_{ARM}_{VIEW}_f{FOLD}_s{SEED}" + (f"_inner_amb{LAMBDA_AMB:g}" if PHASE == "inner" else "")
+else:
+    RUN_NAME = f"stage1_{ARM}_f{FOLD}_s{SEED}" + (f"_inner_v{LAMBDA_V:g}_a{LAMBDA_A:g}" if PHASE == "inner" else "")
 TAG = f"{MODEL_ID}+{RUN_NAME}"
 OUT_DIR = Path(os.environ.get("OUT_DIR", f"/kaggle/working/{RUN_NAME}"))
 T_START = time.time()
-print("run:", RUN_NAME, "| lambdas V/A/I:", LAMBDA_V, LAMBDA_A, LAMBDA_I)
+VIEWS_DIR = os.environ.get("CREMAD_VIEWS_DIR")
+if VIEW == "A1" and VIEWS_DIR is None:
+    hits = [h for k in range(9) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "cremad_views/views.csv"))]
+    if not hits:  # attached as an archive that was not unpacked: unpack it outside the output folder
+        import zipfile
+        for z in (h for k in range(9) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "*.zip"))):
+            with zipfile.ZipFile(z) as zf:
+                names = [n for n in zf.namelist() if n.endswith("cremad_views/views.csv") or n == "views.csv"]
+                if names:
+                    print("unpacking", z, "(about a minute)")
+                    zf.extractall("/tmp/cremad_views_unzip")
+                    hits = [os.path.join("/tmp/cremad_views_unzip", names[0])]
+                    break
+    assert hits, "No cremad_views/views.csv under /kaggle/input: attach the output of prep_cremad_views.ipynb."
+    VIEWS_DIR = os.path.dirname(hits[0])
+print("run:", RUN_NAME, "| view:", VIEW, "| lambdas V/A/I/amb:", LAMBDA_V, LAMBDA_A, LAMBDA_I, LAMBDA_AMB,
+      "| train visual:", TRAIN_VISUAL, "| readings:", TRAIN_CONDS)
 """ + COMMON_REPORT),
     md("## Load the model, add LoRA and the intensity heads"),
     code(r"""
@@ -2917,10 +2947,24 @@ def keep_last(module, args):
 
 base.lm_head.register_forward_pre_hook(keep_last)
 torch.manual_seed(SEED)
+targets = LORA_TARGETS
+if TRAIN_VISUAL:  # + LoRA on the attention (q, k, v, proj) of the last VIS_BLOCKS vision blocks
+    n_vis = len(base.visual.blocks)
+    ids = "|".join(str(i) for i in range(max(0, n_vis - VIS_BLOCKS), n_vis))
+    targets = rf"^(model\.layers\.\d+\.self_attn\.(q|k|v|o)_proj|visual\.blocks\.({ids})\.attn\.(q|k|v|proj))$"
 model = get_peft_model(base, LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
-                                        target_modules=LORA_TARGETS, bias="none"))
+                                        target_modules=targets, bias="none"))
 lora_params = [p for p in model.parameters() if p.requires_grad]
 HEAD_DEVICE = base.lm_head.weight.device
+merger_params = []
+if TRAIN_VISUAL:  # the merger (vision tokens -> language model) trained in full, in float32 like the LoRA weights
+    merger = base.visual.merger
+    merger.float()
+    merger.register_forward_pre_hook(lambda module, args: (args[0].float(),) + args[1:])
+    merger.register_forward_hook(lambda module, args, out: out.to(base.lm_head.weight.dtype))
+    for p in merger.parameters():
+        p.requires_grad_(True)
+    merger_params = list(merger.parameters())
 
 
 class IntensityHeads(torch.nn.Module):
@@ -2936,7 +2980,24 @@ class IntensityHeads(torch.nn.Module):
 
 hidden_size = base.config.text_config.hidden_size if hasattr(base.config, "text_config") else base.config.hidden_size
 heads = IntensityHeads(hidden_size).to(HEAD_DEVICE, torch.float32)
-print(f"LoRA trainable params: {sum(p.numel() for p in lora_params) / 1e6:.1f} M | intensity heads: "
+
+
+class AmbiguityHead(torch.nn.Module):
+    # a ranking score s for the AV raters' disagreement, from the AV reading's last hidden state
+    def __init__(self, d):
+        super().__init__()
+        self.norm = torch.nn.LayerNorm(d, elementwise_affine=False)
+        self.out = torch.nn.Linear(d, 1)
+
+    def forward(self, h):
+        return self.out(self.norm(h)).squeeze(-1)
+
+
+with torch.random.fork_rng(devices=[]):  # leaves the random state of the Stage 1 runs unchanged
+    amb_head = AmbiguityHead(hidden_size).to(HEAD_DEVICE, torch.float32)
+n_vis_lora = sum(p.numel() for n, p in model.named_parameters() if p.requires_grad and ".visual." in n)
+print(f"LoRA trainable params: {sum(p.numel() for p in lora_params) / 1e6:.1f} M (vision: {n_vis_lora / 1e6:.2f} M) | "
+      f"merger: {sum(p.numel() for p in merger_params) / 1e6:.1f} M | intensity heads: "
       f"{sum(p.numel() for p in heads.parameters()) / 1e3:.0f} k | readings trained: {TRAIN_CONDS}")
 for i in range(torch.cuda.device_count()):
     print(f"cuda:{i} allocated after load: {torch.cuda.memory_allocated(i) / 2**30:.1f} GiB")
@@ -2967,6 +3028,16 @@ clips = clips.merge(inten, left_on="uid", right_index=True, how="left")
 for c, k in (("AV", "av"), ("V", "v"), ("A", "a")):
     votes = clips[[f"{k}_{l}" for l in LABELS]].to_numpy(float)
     clips[f"p_{c}"] = list(votes / votes.sum(1, keepdims=True))
+pav = np.stack(clips["p_AV"])  # A^AV: normalised entropy of the AV votes (the ranking target)
+clips["A_AV"] = -np.where(pav > 0, pav * np.log(np.where(pav > 0, pav, 1)), 0).sum(1) / np.log(len(LABELS))
+if VIEW == "A1":  # 4 fps frames for every reading (build_messages joins DATA_DIR with an absolute path unchanged)
+    views = pd.read_csv(Path(VIEWS_DIR) / "views.csv")
+    views = views[views["status"].isin(["ok", "face_fallback"])]
+    n0 = len(clips)
+    clips = clips.merge(views[["uid", "frames4_dir", "sample_fps4"]], on="uid")
+    clips["frames_dir"] = [str(Path(VIEWS_DIR) / d) for d in clips["frames4_dir"]]
+    clips["sample_fps"] = clips["sample_fps4"]
+    print(f"A1: 4 fps frames for {len(clips)} of {n0} clips")
 if ARM == "s1_avlab":
     clips["p_V"], clips["p_A"] = clips["p_AV"], clips["p_AV"]
 
@@ -3004,6 +3075,31 @@ the same as for the summed loss).
 """),
     code(r"""
 WEIGHT = {"AV": 1.0, "V": LAMBDA_V, "A": LAMBDA_A}
+QUEUE = []  # (detached AV hidden state, A^AV, emotion, sentence) of the last RANK_QUEUE training clips
+RANK_BINS = [0.15, 0.25, 0.4]
+
+
+def rank_loss(h, row):
+    # pairwise logistic ranking of the current clip against queued clips, scored with the current head
+    a, emo, sent = float(row["A_AV"]), row["intended"], row["sentence_code"]
+    valid = [q for q in QUEUE if q[2] == emo and abs(q[1] - a) >= RANK_DELTA]
+    same = [q for q in valid if q[3] == sent]
+    pairs = same if len(same) >= MIN_SENTENCE_PAIRS else valid
+    log = state["rank"]
+    log["clips"] += 1
+    log["pairs"] += len(pairs)
+    log["no_pair"] += not pairs
+    log["sentence_level"] += bool(pairs) and pairs is same
+    for q in pairs:
+        log["delta_bins"][int(np.searchsorted(RANK_BINS, abs(q[1] - a), side="right")) - 1] += 1
+    QUEUE.append((h.detach(), a, emo, sent))
+    del QUEUE[:-RANK_QUEUE]
+    if not pairs:
+        return torch.zeros((), device=h.device)
+    s_i = amb_head(h)
+    s_j = amb_head(torch.stack([q[0] for q in pairs]))
+    r = torch.tensor([np.sign(a - q[1]) for q in pairs], dtype=torch.float32, device=h.device)
+    return torch.nn.functional.softplus(-r * (s_i - s_j)).mean()
 
 
 def reading(row, condition):
@@ -3022,14 +3118,18 @@ def train_clip(row, scale):
         loss = WEIGHT[c] * ce.to(HEAD_DEVICE)
         if LAMBDA_I > 0 and not np.isnan(row[f"zI_{c}"]):
             loss = loss + LAMBDA_I * (heads(h, c) - float(row[f"zI_{c}"])) ** 2
+        if c == "AV" and LAMBDA_AMB > 0:
+            loss = loss + LAMBDA_AMB * rank_loss(h, row)
         scaler.scale(loss * scale).backward()
         out[c] = ce.item()
     return out
 """),
     md("## Checkpoints and resume (as in RQ3/RQ4)"),
     code(r"""
-optimizer = torch.optim.AdamW([{"params": lora_params, "lr": LR}, {"params": list(heads.parameters()), "lr": HEAD_LR}],
-                              weight_decay=0.0)
+groups = [{"params": lora_params, "lr": LR}, {"params": list(heads.parameters()) + list(amb_head.parameters()), "lr": HEAD_LR}]
+if merger_params:
+    groups.append({"params": merger_params, "lr": MERGER_LR})
+optimizer = torch.optim.AdamW(groups, weight_decay=0.0)
 steps_per_epoch = -(-len(train_df) // GRAD_ACCUM)
 total_steps = EPOCHS * steps_per_epoch
 warmup_steps = max(1, int(WARMUP * total_steps))
@@ -3038,8 +3138,10 @@ scheduler = torch.optim.lr_scheduler.LambdaLR(
 scaler = torch.amp.GradScaler("cuda", enabled=ON_GPU)
 IDENT = {"arm": ARM, "phase": PHASE, "fold": FOLD, "seed": SEED, "lambdas": [LAMBDA_V, LAMBDA_A, LAMBDA_I],
          "sizes": [len(train_df), len(eval_df)]}
+if STAGE3:
+    IDENT.update(view=VIEW, lambda_amb=LAMBDA_AMB, train_visual=TRAIN_VISUAL)
 state = {**IDENT, "epoch": 0, "pos": 0, "opt_step": 0, "loss_sum": {}, "loss_n": 0, "oom": 0, "history": [],
-         "train_done": False}
+         "train_done": False, "rank": {"clips": 0, "pairs": 0, "no_pair": 0, "sentence_level": 0, "delta_bins": [0, 0, 0]}}
 
 
 def read_state(folder):
@@ -3050,11 +3152,19 @@ def read_state(folder):
 def save_weights(folder):
     torch.save(get_peft_model_state_dict(model), folder / "adapter.pt")
     torch.save(heads.state_dict(), folder / "heads.pt")
+    if STAGE3:
+        torch.save(amb_head.state_dict(), folder / "amb_head.pt")
+    if merger_params:
+        torch.save(base.visual.merger.state_dict(), folder / "merger.pt")
 
 
 def load_weights(folder):
     set_peft_model_state_dict(model, torch.load(folder / "adapter.pt", map_location="cpu"))
     heads.load_state_dict(torch.load(folder / "heads.pt", map_location="cpu"))
+    if STAGE3:
+        amb_head.load_state_dict(torch.load(folder / "amb_head.pt", map_location="cpu"))
+    if merger_params:
+        base.visual.merger.load_state_dict(torch.load(folder / "merger.pt", map_location="cpu"))
 
 
 def save_checkpoint():
@@ -3124,7 +3234,7 @@ def train():
                     torch.cuda.empty_cache()
                     state["oom"] += 1
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(lora_params + list(heads.parameters()), 1.0)
+            torch.nn.utils.clip_grad_norm_(lora_params + list(heads.parameters()) + list(amb_head.parameters()) + merger_params, 1.0)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
@@ -3139,8 +3249,11 @@ def train():
                 left = (EPOCHS * len(order) - state["epoch"] * len(order) - state["pos"]) * sec / 3600
                 peak = max([torch.cuda.max_memory_allocated(d) / 2**30 for d in range(torch.cuda.device_count())] or [0])
                 n = max(1, state["loss_n"])
+                rk = state["rank"]
+                rank_info = (f" | rank pairs/clip {rk['pairs'] / max(1, rk['clips']):.1f}, no pair {rk['no_pair'] / max(1, rk['clips']):.0%}, "
+                             f"sentence-level {rk['sentence_level'] / max(1, rk['clips']):.0%}, |dA| bins {rk['delta_bins']}") if LAMBDA_AMB > 0 else ""
                 print(f"clip {state['pos']}/{len(order)} | CE " + " ".join(f"{c} {v / n:.3f}" for c, v in state["loss_sum"].items())
-                      + f" | {sec:.2f} s/clip, about {left:.1f} h left | peak {peak:.1f} GiB | OOM {state['oom']}")
+                      + f" | {sec:.2f} s/clip, about {left:.1f} h left | peak {peak:.1f} GiB | OOM {state['oom']}" + rank_info)
         n = max(1, state["loss_n"])
         state["history"].append({"epoch": state["epoch"], **{f"train_CE_{c}": v / n for c, v in state["loss_sum"].items()},
                                  "session_hours": round((time.time() - T_START) / 3600, 2)})
@@ -3178,8 +3291,8 @@ if finished:
     with open(SCORES, "w", encoding="utf-8") as f:
         for rec in records.values():
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    todo = [(row, c) for _, row in eval_df.iterrows() for c in ("AV", "V", "A") if (TAG, row["uid"], c, "score") not in records]
-    print(f"{len(eval_df) * 3} items, {len(eval_df) * 3 - len(todo)} already done, {len(todo)} to run")
+    todo = [(row, c) for _, row in eval_df.iterrows() for c in SCORE_CONDS if (TAG, row["uid"], c, "score") not in records]
+    print(f"{len(eval_df) * len(SCORE_CONDS)} items, {len(eval_df) * len(SCORE_CONDS) - len(todo)} already done, {len(todo)} to run")
     for row, c in todo:
         if out_of_time():
             print("stopped at the time budget: add this notebook's output as an input and commit again")
@@ -3191,6 +3304,8 @@ if finished:
                 mu, sd = I_STATS[c]
                 rec.update(lse=float(torch.logsumexp(logits, dim=-1)), intensity_pred=float(heads(h, c)) * sd + mu,
                            **{f"logit_{l}": float(v) for l, v in zip(LABELS, logits[label_first_ids].tolist())})
+                if c == "AV" and LAMBDA_AMB > 0:
+                    rec["amb_score"] = float(amb_head(h))
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             rec["error"] = "oom"
@@ -3209,8 +3324,12 @@ if SCORES.exists():
     q = np.exp(z - z.max(1, keepdims=True))
     q /= q.sum(1, keepdims=True)
     s["U"] = -(q * np.log(np.clip(q, 1e-12, None))).sum(1) / np.log(len(LABELS))
-    s = s.merge(eval_df[["uid", "p_AV", "p_V", "p_A"]], on="uid")
-    for c in ("AV", "V", "A"):
+    s = s.merge(eval_df[["uid", "p_AV", "p_V", "p_A", "A_AV"]], on="uid")
+    if "amb_score" in s:
+        part = s[s["condition"] == "AV"]
+        print("AV", len(part), "clips | Spearman(amb_score, A^AV):",
+              round(pd.Series(part["amb_score"].to_numpy()).corr(pd.Series(part["A_AV"].to_numpy()), method="spearman"), 3))
+    for c in SCORE_CONDS:
         part = s[s["condition"] == c]
         p = np.stack(part[f"p_{c}"])
         h = -(p * np.log(np.clip(p, 1e-12, None))).sum(1) / np.log(len(LABELS))
@@ -3218,6 +3337,46 @@ if SCORES.exists():
               round(pd.Series(part["U"].to_numpy()).corr(pd.Series(h), method="spearman"), 3))
 """),
 ]
+
+
+def stage3_cells():
+    cells = [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in STAGE1]
+    cells[0] = md(r"""
+# Stage 3 on CREMA-D: human-ambiguity-aware learning (Kaggle, 2× T4)
+
+Same code as `stage1_cremad.ipynb`, with Stage 3 settings by default. Method arm `s3`: one LoRA on Qwen2.5-Omni-7B
+(language model attention, as m3) **plus** LoRA on the attention of the last 8 vision blocks **plus** the vision
+merger trained in full; 4 fps frames (`VIEW = A1`); two readings per clip (AV, V-only) and an ambiguity head on the AV
+reading's last hidden state:
+
+    L = CE(q_AV, p_AV) + 0.1 * CE(q_V, p_V) + LAMBDA_AMB * L_rank
+
+L_rank: pairwise logistic ranking of the clip's score s_i against the clips in a queue of the last 256 training clips
+(their detached AV hidden states, re-scored with the current head), over pairs with the same intended emotion and
+|A_i - A_j| >= 0.15, restricted to the same sentence when at least 8 such pairs exist. A = normalised entropy of the AV
+votes. The score s (`amb_score` in `scores.jsonl`) is the method's prediction; the entropy of q_AV is reported too.
+
+**Arms** (`ARM`): `m3` with `VIEW = A1` (the baseline at 4 fps); `s3` (method); ablations `s3_frozenvis` (no visual
+training), `s3_norank` (no ranking loss), `s3_noV` (no V reading). Scored readings: AV and V.
+
+**Runs, in order**
+1. `ARM = m3`, `VIEW = A1`, `PHASE = outer`, `FOLD` = 0, 1, 2 (baseline at 4 fps).
+2. `ARM = s3`, `PHASE = inner`, `FOLD = 0`, `LAMBDA_AMB` = 0.1 and 0.5 (two runs; choose by Spearman(amb_score, A^AV)
+   on the inner held-out actors).
+3. `ARM = s3`, `PHASE = outer`, `FOLD` = 0, 1, 2 with the chosen `LAMBDA_AMB`.
+
+**Running it**
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: `cremad_mm/` and the output of
+   `prep_cremad_views.ipynb` (`cremad_views/`).
+2. Set `ARM`, `PHASE`, `FOLD`, `VIEW`, `LAMBDA_AMB` in the config cell. First run with `LIMIT = 10` once and send the
+   progress lines (speed, peak memory, ranking pairs).
+3. **Save & Run All (Commit)**. If it stops at `TIME_BUDGET_H`, attach this notebook's own output and commit again.
+4. Results: `/kaggle/working/<RUN_NAME>/` (`stage3_...`) with `scores.jsonl` and `state.json`.
+""")
+    i = next(k for k, c in enumerate(cells) if 'ARM = os.environ.get("ARM", "s1")' in c["source"])
+    cells[i] = _patched(cells[i], ('ARM = os.environ.get("ARM", "s1")', 'ARM = os.environ.get("ARM", "s3")'),
+                        ('VIEW = os.environ.get("VIEW", "A0")', 'VIEW = os.environ.get("VIEW", "A1")'))
+    return cells
 
 
 # ---- Experiment B (+ A): visual representations probed for the video-only raters' votes ---------------
@@ -3589,4 +3748,5 @@ if __name__ == "__main__":
     write(HERE / "cremad_lora.ipynb", cremad_lora_cells())
     write(HERE / "stage1_cremad.ipynb", [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in STAGE1])
     write(HERE / "prep_cremad_views.ipynb", PREP_VIEWS)
+    write(HERE / "stage3_cremad.ipynb", stage3_cells())
     write(HERE / "probe_visual.ipynb", [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in PROBE_VISUAL])

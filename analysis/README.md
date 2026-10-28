@@ -85,6 +85,10 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
 15. **Stage C readouts (B0-B2)**: `kaggle/probe_visual.ipynb` with `MODEL_KIND = m3`, `CONDITION = AV`, `FOLD` = 0, 1, 2
     (the Stage 1 run's output attached); copy the `vprobe_m3_A0_AV_f*` folders to `results/visual_probe/`, then run
     `ambiguity_readout.py`.
+16. **Stage 3 (human-ambiguity-aware learning)**: `kaggle/stage3_cremad.ipynb` (same code as `stage1_cremad.ipynb`, Stage 3
+    defaults), with `cremad_mm/` and `cremad_views/` attached. Runs: `ARM = m3`, `VIEW = A1`, folds 0-2; `ARM = s3`,
+    `PHASE = inner`, `FOLD = 0`, `LAMBDA_AMB` = 0.1 and 0.5; then `ARM = s3`, outer folds 0-2 with the chosen weight.
+    Copy each `stage3_*` output folder to `results/stage3/`.
 
 ## Note on clip ids
 
