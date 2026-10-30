@@ -1,0 +1,3 @@
+lambda_amb,"Spearman(amb_score, A^AV) [criterion]",partial given emotion x sentence (amb_score),"Spearman(U^AV entropy, A^AV)"
+0.5,"0.558 [0.454, 0.624]","0.478 [0.324, 0.561]","0.620 [0.553, 0.678]"
+0.1,"0.539 [0.425, 0.608]","0.474 [0.315, 0.558]","0.626 [0.558, 0.685]"

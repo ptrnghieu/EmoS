@@ -1,0 +1,3 @@
+run,train_done,held-out clips,scored AV,OOM,complete,ranking pairs per clip,clips without a pair,sentence-level pairs used,"dA in [.15,.25) / [.25,.4) / >=.4"
+stage3_s3_A1_f0_s0_inner_amb0.1,True,738,738,0,True,24.5,0.4%,4.8%,40341 / 36831 / 24741
+stage3_s3_A1_f0_s0_inner_amb0.5,True,738,738,0,True,24.5,0.4%,4.8%,40362 / 36866 / 24772

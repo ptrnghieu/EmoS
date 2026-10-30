@@ -1,0 +1,44 @@
+{
+ "arm": "m3",
+ "phase": "outer",
+ "fold": 0,
+ "seed": 0,
+ "lambdas": [
+  0.25,
+  0.25,
+  0.0
+ ],
+ "sizes": [
+  4898,
+  2540
+ ],
+ "view": "A1",
+ "lambda_amb": 0.0,
+ "train_visual": false,
+ "epoch": 1,
+ "pos": 0,
+ "opt_step": 613,
+ "loss_sum": {},
+ "loss_n": 0,
+ "oom": 0,
+ "history": [
+  {
+   "epoch": 0,
+   "train_CE_AV": 1.0448066545795347,
+   "session_hours": 7.94
+  }
+ ],
+ "train_done": true,
+ "rank": {
+  "clips": 0,
+  "pairs": 0,
+  "no_pair": 0,
+  "sentence_level": 0,
+  "delta_bins": [
+   0,
+   0,
+   0
+  ]
+ },
+ "saved_at": 1793230142.9097013
+}

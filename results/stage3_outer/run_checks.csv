@@ -1,0 +1,10 @@
+run,arm,fold,expected,scored AV,scored V,complete
+stage1_m3_f0_s0,m3_A0,0,2540,2540,2540,True
+stage1_m3_f1_s0,m3_A0,1,2448,2448,2448,True
+stage1_m3_f2_s0,m3_A0,2,2450,2450,2450,True
+stage1_s1_noI_f0_s0,s1_noI_A0,0,2540,2540,2540,True
+stage1_s1_noI_f1_s0,s1_noI_A0,1,2448,2448,2448,True
+stage1_s1_noI_f2_s0,s1_noI_A0,2,2450,2450,2450,True
+stage3_m3_A1_f0_s0,m3_A1,0,2540,2540,2540,True
+stage3_m3_A1_f1_s0,m3_A1,1,2448,2448,2448,True
+stage3_m3_A1_f2_s0,m3_A1,2,2450,2450,2450,True
