@@ -40,7 +40,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from cremad_human import counts, jsd
+from cremad_human import counts, fit_dirichlet, jsd
 from preprocess_cremad import LABELS, clip_table
 from rq3_analysis import Bootstrap, softmax
 from rq_analysis import markdown, spearman
@@ -110,14 +110,26 @@ def main() -> None:
     H = lambda p: norm_entropy(p)
 
     # simulated re-runs of the human study
-    reps = []
-    for _ in range(N_REP):
-        rep = {}
-        for c in CONDS:
-            g = rng.gamma(C[c] + 0.5)
-            theta = g / g.sum(1, keepdims=True)
-            rep[c] = rng.multinomial(n[c].astype(int), theta) / n[c][:, None]
-        reps.append(rep)
+    prior = {c: fit_dirichlet(C[c]) for c in CONDS}  # (concentration, mean) per condition, for the empirical-Bayes re-run
+
+    def make_reps(gen, seed=0):
+        """theta per clip and condition, then the same number of new votes. gen: 'jeffreys' (main) = Dirichlet(counts +
+        0.5); 'plugin' = theta = observed p; 'eb' = Dirichlet(alpha * pi + counts), alpha and pi fitted per condition."""
+        g_rng, out = np.random.default_rng(seed), []
+        for _ in range(N_REP):
+            rep = {}
+            for c in CONDS:
+                if gen == "plugin":
+                    theta = P[c]
+                else:
+                    a = C[c] + (0.5 if gen == "jeffreys" else prior[c][0] * prior[c][1])
+                    g = g_rng.gamma(a)
+                    theta = g / g.sum(1, keepdims=True)
+                rep[c] = g_rng.multinomial(n[c].astype(int), theta) / n[c][:, None]
+            out.append(rep)
+        return out
+
+    reps = make_reps("jeffreys")
 
     def mean_over_reps(fn):
         return float(np.nanmean([fn(rep) for rep in reps]))
@@ -197,14 +209,54 @@ def main() -> None:
                      "Spearman(w, human w)": b(lambda i: spearman(wm[idx][i], wh[idx][i])),
                      "disambiguation rate (all clips)": boot(lambda i: dm[i].mean()),
                      "recall of human disambiguation": boot(lambda i: dm[i][dh[i]].mean()),
-                     "precision": boot(lambda i: dh[i][dm[i]].mean() if dm[i].any() else np.nan)})
+                     "precision": boot(lambda i: dh[i][dm[i]].mean() if dm[i].any() else np.nan),
+                     "false-positive rate (flags a clip humans do not disambiguate)": boot(lambda i: dm[i][~dh[i]].mean())})
     rows.append({"predictor": "human re-run (reference)", "clips with differing unimodal votes": len(idx),
                  "mean audio weight w": f"{mean_over_reps(lambda r: mixture_weight(r['V'], r['A'], r['AV'])[idx].mean()):.3f}",
                  "Spearman(w, human w)": f"{mean_over_reps(lambda r: spearman(mixture_weight(r['V'], r['A'], r['AV'])[idx], wh[idx])):.3f}",
                  "disambiguation rate (all clips)": f"{mean_over_reps(lambda r: disamb(r['V'], r['A'], r['AV']).mean()):.3f}",
                  "recall of human disambiguation": f"{mean_over_reps(lambda r: disamb(r['V'], r['A'], r['AV'])[dh].mean()):.3f}",
-                 "precision": f"{mean_over_reps(lambda r: dh[disamb(r['V'], r['A'], r['AV'])].mean()):.3f}"})
+                 "precision": f"{mean_over_reps(lambda r: dh[disamb(r['V'], r['A'], r['AV'])].mean()):.3f}",
+                 "false-positive rate (flags a clip humans do not disambiguate)": f"{mean_over_reps(lambda r: disamb(r['V'], r['A'], r['AV'])[~dh].mean()):.3f}"})
     tables["3_integration"] = pd.DataFrame(rows)
+    # the same per intended emotion: aggregate rates can hide errors that cancel across emotions
+    rows = []
+    dms = {arm: disamb(Q[arm]["V"], Q[arm]["A"], Q[arm]["AV"]) for arm in ARMS}
+    drs = [disamb(r["V"], r["A"], r["AV"]) for r in reps]
+    for e in np.unique(emo):
+        sel = emo == e
+        rec = {"intended emotion": e, "clips": int(sel.sum()), "human disambiguation rate": round(float(dh[sel].mean()), 3)}
+        for name, d in list(dms.items()) + [("human re-run", None)]:
+            if d is None:
+                rate = np.mean([x[sel].mean() for x in drs]); recall = np.mean([x[sel & dh].mean() for x in drs])
+                fpr = np.mean([x[sel & ~dh].mean() for x in drs]); prec = np.nanmean([dh[sel & x].mean() for x in drs])
+            else:
+                rate, recall, fpr = d[sel].mean(), d[sel & dh].mean(), d[sel & ~dh].mean()
+                prec = dh[sel & d].mean() if (sel & d).any() else np.nan
+            rec.update({f"{name}: rate": round(float(rate), 3), f"{name}: recall": round(float(recall), 3),
+                        f"{name}: precision": round(float(prec), 3), f"{name}: FPR": round(float(fpr), 3)})
+        rows.append(rec)
+    tables["3b_disambiguation_by_emotion"] = pd.DataFrame(rows)
+
+    # ---- sensitivity of the human re-run reference to its generator -----------------------------------
+    rows = []
+    for gen, label in (("jeffreys", "Dirichlet(counts + 0.5) [main]"), ("plugin", "theta = observed p"),
+                       ("eb", "empirical Bayes: Dirichlet(alpha pi + counts)")):
+        rr = reps if gen == "jeffreys" else make_reps(gen, seed=1)
+        for c in CONDS:
+            top = P[c] == P[c].max(1, keepdims=True)
+            js = [jsd(r[c], P[c]).mean() for r in rr]
+            tl = [top[np.arange(len(r[c])), r[c].argmax(1)].mean() for r in rr]
+            rows.append({"generator": label, "condition": c, "JSD to votes: mean (SD over re-runs)": f"{np.mean(js):.3f} ({np.std(js):.4f})",
+                         "top label among raters' top: mean (SD)": f"{np.mean(tl):.3f} ({np.std(tl):.4f})",
+                         "s1_noI JSD minus re-run JSD": f"{jsd(Q['s1_noI'][c], P[c]).mean() - np.mean(js):+.3f}"})
+        dr = [disamb(r["V"], r["A"], r["AV"]) for r in rr]
+        rows.append({"generator": label, "condition": "disambiguation",
+                     "JSD to votes: mean (SD over re-runs)": f"recall {np.mean([x[dh].mean() for x in dr]):.3f}",
+                     "top label among raters' top: mean (SD)": f"FPR {np.mean([x[~dh].mean() for x in dr]):.3f}",
+                     "s1_noI JSD minus re-run JSD": ""})
+    tables["5_rerun_generator_sensitivity"] = pd.DataFrame(rows + [{"generator": "fitted Dirichlet prior (concentration, per condition)",
+                                                                     "condition": " / ".join(f"{c} {prior[c][0]:.2f}" for c in CONDS)}])
 
     # ---- failure cases (s1_noI) --------------------------------------------------------------------------
     arm = "s1_noI"
@@ -229,6 +281,30 @@ def main() -> None:
     tables["subset_sizes"] = pd.DataFrame([{"model": a, "both unimodal readings good": int(good[a].sum()),
                                             "of which large human V->AV change (>= 0.4)": int((good[a] & (np.linalg.norm(Dh, axis=1) >= 0.4)).sum())}
                                            for a in ARMS])
+
+    # ---- dispersion: mean entropy per emotion, and per-condition temperature fitted on the other folds ----
+    rows = []
+    for e in np.unique(emo):
+        sel = emo == e
+        rows.append({"intended emotion": e, **{f"{who} {c}": round(float(H(Pc if who == 'humans' else Q[who][c])[sel].mean()), 3)
+                                               for c, Pc in P.items() for who in ("humans",) + ARMS}})
+    tables["6_mean_entropy_by_emotion"] = pd.DataFrame(rows)
+    temps = np.exp(np.linspace(np.log(0.2), np.log(3), 80))
+    rows = []
+    for arm in ARMS:
+        for c in CONDS:
+            Z = models[arm][c].loc[uids].to_numpy(float)
+            cal, chosen = np.zeros_like(P[c]), []
+            for f in range(N_OUTER):
+                tr, te = folds != f, folds == f
+                t = temps[int(np.argmin([-(P[c][tr] * np.log(np.clip(softmax(Z[tr], t), 1e-12, None))).sum(1).mean() for t in temps]))]
+                cal[te], _ = softmax(Z[te], t), chosen.append(round(float(t), 2))
+            q = Q[arm][c]
+            rows.append({"predictor": arm, "condition": c, "temperature per fold (CE on the other folds)": " / ".join(map(str, chosen)),
+                         "JSD raw -> calibrated": f"{jsd(q, P[c]).mean():.3f} -> {jsd(cal, P[c]).mean():.3f}",
+                         "mean H(q) raw -> calibrated (human)": f"{H(q).mean():.3f} -> {H(cal).mean():.3f} ({H(P[c]).mean():.3f})",
+                         "Spearman(H(q), H(p)) raw -> calibrated": f"{spearman(H(q), H(P[c])):.3f} -> {spearman(H(cal), H(P[c])):.3f}"})
+    tables["7_temperature_scaling"] = pd.DataFrame(rows)
 
     import matplotlib
     matplotlib.use("Agg")

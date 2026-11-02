@@ -1,0 +1,14 @@
+generator,condition,JSD to votes: mean (SD over re-runs),top label among raters' top: mean (SD),s1_noI JSD minus re-run JSD
+Dirichlet(counts + 0.5) [main],V,0.096 (0.0009),0.784 (0.0034),+0.046
+Dirichlet(counts + 0.5) [main],A,0.100 (0.0008),0.730 (0.0038),-0.012
+Dirichlet(counts + 0.5) [main],AV,0.095 (0.0005),0.807 (0.0024),-0.006
+Dirichlet(counts + 0.5) [main],disambiguation,recall 0.476,FPR 0.233,
+theta = observed p,V,0.030 (0.0002),0.887 (0.0024),+0.112
+theta = observed p,A,0.035 (0.0003),0.851 (0.0027),+0.052
+theta = observed p,AV,0.027 (0.0002),0.904 (0.0026),+0.061
+theta = observed p,disambiguation,recall 0.665,FPR 0.121,
+empirical Bayes: Dirichlet(alpha pi + counts),V,0.073 (0.0007),0.811 (0.0049),+0.069
+empirical Bayes: Dirichlet(alpha pi + counts),A,0.089 (0.0008),0.751 (0.0041),-0.001
+empirical Bayes: Dirichlet(alpha pi + counts),AV,0.065 (0.0006),0.836 (0.0040),+0.023
+empirical Bayes: Dirichlet(alpha pi + counts),disambiguation,recall 0.569,FPR 0.246,
+"fitted Dirichlet prior (concentration, per condition)",V 1.50 / A 3.10 / AV 1.25,,,

@@ -2845,6 +2845,8 @@ back-propagated on its own (memory as for one reading).
 - `s1`: AV + V + A votes + intensity.
 - `s1_noI`: AV + V + A votes, no intensity.
 - `s1_avlab`: V and A readings trained on the **AV** votes (ablation: extra readings without per-condition labels).
+- `v_only`: the V reading alone, trained on the video-only votes with weight 1 (control for joint training; scored
+  under V only). Same model, LoRA, input, clips, epochs and optimizer steps as `s1_noI`; the V loss weight differs (1 vs 0.1).
 
 **Folds.** Actors are split into `N_OUTER` = 3 outer folds (fixed seed, stratified by sex). `PHASE = "outer"`: train
 on the other two folds' actors, score fold `FOLD`'s actors. `PHASE = "inner"` (lambda search): within the training
@@ -2865,15 +2867,17 @@ actors of fold `FOLD`, hold out 15% of actors and score those instead; the outer
 %pip uninstall -y -q torchao
 """),
     code(COMMON_CONFIG + CREMAD_DATA + r"""
-ARM = os.environ.get("ARM", "s1")            # m3 | s1 | s1_noI | s1_avlab | s3 | s3_frozenvis | s3_norank | s3_noV
+ARM = os.environ.get("ARM", "s1")            # m3 | s1 | s1_noI | s1_avlab | v_only | s3 | s3_frozenvis | s3_norank | s3_noV
 PHASE = os.environ.get("PHASE", "outer")     # outer: score the outer fold | inner: lambda search on held-out training actors
 FOLD = int(os.environ.get("FOLD", 0))        # outer fold, 0..N_OUTER-1
 SEED = int(os.environ.get("SEED", 0))
 VIEW = os.environ.get("VIEW", "A0")          # A0: 2 fps (Stage 1) | A1: 4 fps (needs the output of prep_cremad_views.ipynb)
 S3 = ARM.startswith("s3")
 LAMBDA_V = float(os.environ.get("LAMBDA_V", 0.1 if S3 else 0.25))
+if ARM == "v_only":  # the V task alone, weight 1
+    LAMBDA_V = 1.0
 LAMBDA_A = float(os.environ.get("LAMBDA_A", 0.25))
-LAMBDA_I = 0.0 if ARM in ("m3", "s1_noI", "s1_avlab") or S3 else float(os.environ.get("LAMBDA_I", 0.1))
+LAMBDA_I = 0.0 if ARM in ("m3", "s1_noI", "s1_avlab", "v_only") or S3 else float(os.environ.get("LAMBDA_I", 0.1))
 # Stage 3: ranking loss on an ambiguity head (AV reading), weight chosen on the inner split of fold 0 from {0.1, 0.5}
 LAMBDA_AMB = float(os.environ.get("LAMBDA_AMB", 0.1)) if ARM in ("s3", "s3_frozenvis", "s3_noV") else 0.0
 TRAIN_VISUAL = ARM in ("s3", "s3_norank", "s3_noV")  # train the merger + LoRA on the last VIS_BLOCKS vision blocks
@@ -2891,11 +2895,11 @@ CKPT_EVERY = 200
 TRAIN_MAX_MEMORY = {0: "10GiB", 1: "14GiB"}
 TIME_BUDGET_H = 11.0
 LIMIT = None                 # e.g. 10 for a quick check: 10 training clips and 10 scored clips
-assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "s3", "s3_frozenvis", "s3_norank", "s3_noV")
+assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "v_only", "s3", "s3_frozenvis", "s3_norank", "s3_noV")
 assert PHASE in ("outer", "inner") and 0 <= FOLD < N_OUTER and VIEW in ("A0", "A1")
-TRAIN_CONDS = ("AV",) if ARM in ("m3", "s3_noV") else ("AV", "V") if S3 else ("AV", "V", "A")
+TRAIN_CONDS = ("AV",) if ARM in ("m3", "s3_noV") else ("V",) if ARM == "v_only" else ("AV", "V") if S3 else ("AV", "V", "A")
 STAGE3 = S3 or VIEW != "A0"
-SCORE_CONDS = ("AV", "V") if STAGE3 else ("AV", "V", "A")
+SCORE_CONDS = ("V",) if ARM == "v_only" else ("AV", "V") if STAGE3 else ("AV", "V", "A")
 if STAGE3:
     RUN_NAME = f"stage3_{ARM}_{VIEW}_f{FOLD}_s{SEED}" + (f"_inner_amb{LAMBDA_AMB:g}" if PHASE == "inner" else "")
 else:

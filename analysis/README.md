@@ -89,6 +89,9 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
     defaults), with `cremad_mm/` and `cremad_views/` attached. Runs: `ARM = m3`, `VIEW = A1`, folds 0-2; `ARM = s3`,
     `PHASE = inner`, `FOLD = 0`, `LAMBDA_AMB` = 0.1 and 0.5; then `ARM = s3`, outer folds 0-2 with the chosen weight.
     Copy each `stage3_*` output folder to `results/stage3/`.
+17. **Cross-condition diagnostic** (no training): `cross_condition_diagnostic.py` on the Stage 1 outer runs (m3, s1_noI).
+18. **V-only control**: `kaggle/stage1_cremad.ipynb` with `ARM = v_only`, `PHASE = outer`, `FOLD` = 0, 1, 2 (A0 input);
+    copy `stage1_v_only_f*_s0` to `results/stage1/`, then run `vonly_compare.py`.
 
 ## Note on clip ids
 

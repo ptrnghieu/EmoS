@@ -1,0 +1,132 @@
+"""Is the weak video-only prediction a limit of the representation, or partly a consequence of joint adaptation?
+(Controlled V-only baseline, 02/11/2026.)
+
+Video-only readings of the same held-out actors (3 outer folds over actors, seed 0; each clip read by the model of the
+fold that never saw its actor), against the video-only raters' votes p^V:
+    base     zero-shot Qwen2.5-Omni-7B (results/cremad_qwen/scores.jsonl, condition V)
+    m3       LoRA trained on the AV votes only (V never supervised)
+    s1_noI   LoRA trained on AV + V + A votes, V loss weight 0.1, A 0.5 (AV-criterion lambda search)
+    v_only   same model, LoRA, input, clips, epochs and optimizer steps as s1_noI; the V task alone, weight 1
+
+Metrics: JSD(q^V, p^V) (lower is better); top label among the raters' top labels; Spearman(H(q^V), H(p^V)); the same
+partial given the intended emotion; mean H(q^V). Paired differences v_only minus s1_noI (and minus m3), 95% bootstrap
+over actors, and per fold. References for JSD: the simulated human re-runs of cross_condition_diagnostic.py
+(Dirichlet(counts + 0.5) and empirical Bayes). The training budget of each arm is reported beside the results.
+
+Reading (to be confirmed before the runs are seen):
+    v_only clearly better than s1_noI (JSD lower with CI below 0 and at least a third of the gap to the
+    empirical-Bayes re-run closed) -> joint training / task weighting limits V learning: study that first
+    similar -> the representation is the limit: compare a dedicated visual emotion model, same supervision and splits
+    JSD better but entropy ranking (Spearman, partial) not -> the remaining problem is narrower than recognition
+
+Usage (from the repository root; downloads the CREMA-D rating files):
+    python analysis/vonly_compare.py --out results/vonly_compare
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from cremad_human import counts, fit_dirichlet, jsd
+from preprocess_cremad import LABELS, clip_table
+from rq3_analysis import Bootstrap, softmax
+from rq_analysis import markdown, spearman
+from visual_probe_analysis import N_OUTER, norm_entropy, outer_folds, partial_spearman
+
+N_BOOT, N_REP = 1000, 20
+
+
+def read_scores(path: Path, cond: str = "V") -> pd.DataFrame:
+    s = pd.DataFrame([json.loads(l) for l in open(path, encoding="utf-8") if l.strip()])
+    s = s[(s.condition == cond) & s.get("error", pd.Series(index=s.index, dtype=object)).isna()]
+    return s.drop_duplicates("uid", keep="last").set_index("uid")[[f"logit_{l}" for l in LABELS]]
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--runs", type=Path, default=Path("results/stage1"))
+    parser.add_argument("--zero-shot", type=Path, default=Path("results/cremad_qwen/scores.jsonl"))
+    parser.add_argument("--out", type=Path, default=Path("results/vonly_compare"))
+    args = parser.parse_args()
+    args.out.mkdir(parents=True, exist_ok=True)
+
+    df = clip_table().set_index("uid")
+    df["fold"] = df.actor.map(outer_folds(df.reset_index()))
+    arms, budget = {}, []
+    if args.zero_shot.exists():
+        arms["base (zero-shot)"] = read_scores(args.zero_shot)
+    for arm in ("m3", "s1_noI", "v_only"):
+        parts, hours, steps, clips = [], 0.0, 0, 0
+        for f in range(N_OUTER):
+            run = args.runs / f"stage1_{arm}_f{f}_s0"
+            if not (run / "scores.jsonl").exists():
+                break
+            st = json.loads((run / "state.json").read_text())
+            assert st.get("train_done") and st.get("phase") == "outer", run
+            parts.append(read_scores(run / "scores.jsonl"))
+            hours += sum(h.get("session_hours", 0) for h in st["history"])
+            steps += st["opt_step"]
+            clips += st["sizes"][0]
+        if len(parts) == N_OUTER:
+            arms[arm] = pd.concat(parts)
+            readings = {"m3": "AV", "s1_noI": "AV + V + A", "v_only": "V"}[arm]
+            weight = {"m3": "0 (not trained)", "s1_noI": f"{st['lambdas'][0]:g}", "v_only": f"{st['lambdas'][0]:g}"}[arm]
+            budget.append({"arm": arm, "readings trained per clip": readings, "V loss weight": weight,
+                           "V-supervised clips (3 folds, 1 epoch)": clips if arm != "m3" else 0, "optimizer steps (3 folds)": steps,
+                           "GPU hours logged (last session per fold)": round(hours, 1)})
+    common = sorted(set(df.index[df.v_n > 0]).intersection(*(set(a.index) for a in arms.values())))
+    d = df.loc[common]
+    P = counts(d, "v")
+    P = P / P.sum(1, keepdims=True)
+    hp, emo, folds = norm_entropy(P), d.intended.to_numpy(), d.fold.to_numpy()
+    top = P == P.max(1, keepdims=True)
+    boot = Bootstrap(d.actor.to_numpy(), N_BOOT)
+    Q = {name: softmax(a.loc[common].to_numpy(float)) for name, a in arms.items()}
+
+    def metrics(q):
+        j, hit, hq = jsd(q, P), top[np.arange(len(q)), q.argmax(1)], norm_entropy(q)
+        return {"JSD to V votes": lambda i: j[i].mean(), "top label among raters' top": lambda i: hit[i].mean(),
+                "Spearman(H(q), H(p))": lambda i: spearman(hq[i], hp[i]),
+                "partial given emotion": lambda i: partial_spearman(hq[i], hp[i], emo[i]),
+                "mean H(q)": lambda i: hq[i].mean()}
+
+    rows = [{"predictor": n, **{k: boot(f) for k, f in metrics(q).items()},
+             **{f"JSD fold {f}": round(float(jsd(q, P)[folds == f].mean()), 3) for f in range(N_OUTER)}} for n, q in Q.items()]
+    C = counts(d, "v")
+    alpha, pi = fit_dirichlet(C)
+    rng = np.random.default_rng(0)
+    for label, extra in (("human re-run, Dirichlet(counts + 0.5)", 0.5), ("human re-run, empirical Bayes", alpha * pi)):
+        js = []
+        for _ in range(N_REP):
+            g = rng.gamma(C + extra)
+            js.append(jsd(rng.multinomial(C.sum(1).astype(int), g / g.sum(1, keepdims=True)) / C.sum(1, keepdims=True), P).mean())
+        rows.append({"predictor": label, "JSD to V votes": f"{np.mean(js):.3f}", "mean H(q)": f"(human {hp.mean():.3f})"})
+    tables = {"v_reading": pd.DataFrame(rows)}
+    rows = []
+    for ref in ("s1_noI", "m3"):
+        if "v_only" in Q and ref in Q:
+            a, b = metrics(Q["v_only"]), metrics(Q[ref])
+            rows.append({"comparison": f"v_only minus {ref}", **{k: boot(lambda i, k=k: a[k](i) - b[k](i)) for k in a},
+                         **{f"JSD fold {f}": round(float(jsd(Q['v_only'], P)[folds == f].mean() - jsd(Q[ref], P)[folds == f].mean()), 3)
+                            for f in range(N_OUTER)}})
+    if rows:
+        tables["paired"] = pd.DataFrame(rows)
+    tables["training_budget"] = pd.DataFrame(budget)
+
+    lines = ["# Video-only reading: joint training (s1_noI) against the V task alone (v_only)\n",
+             f"Generated by `analysis/vonly_compare.py`. {len(common)} clips, {d.actor.nunique()} actors, read by the fold "
+             f"model that never saw the actor. CIs: 95% bootstrap over actors ({N_BOOT}).\n"]
+    for name, table in tables.items():
+        table.to_csv(args.out / f"{name}.csv", index=False)
+        lines += [f"## {name}\n", markdown(table.astype(object).where(table.notna(), "")), ""]
+    (args.out / "report.md").write_text("\n".join(lines), encoding="utf-8")
+    print("\n".join(lines))
+
+
+if __name__ == "__main__":
+    main()
