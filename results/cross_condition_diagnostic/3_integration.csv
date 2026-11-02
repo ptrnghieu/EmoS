@@ -1,0 +1,5 @@
+predictor,clips with differing unimodal votes,mean audio weight w,"Spearman(w, human w)",disambiguation rate (all clips),recall of human disambiguation,precision
+humans (observed),5613,0.347,,0.300,,
+m3,5613,"0.519 [0.504, 0.534]","0.313 [0.285, 0.344]","0.141 [0.128, 0.154]","0.192 [0.172, 0.213]","0.407 [0.376, 0.433]"
+s1_noI,5613,"0.491 [0.473, 0.512]","0.380 [0.351, 0.409]","0.388 [0.366, 0.410]","0.479 [0.450, 0.505]","0.370 [0.352, 0.390]"
+human re-run (reference),5613,0.407,0.446,0.306,0.476,0.466

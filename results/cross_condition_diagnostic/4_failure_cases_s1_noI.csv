@@ -1,0 +1,7 @@
+clip,intended,votes V/A/AV,human V,model V,human A,model A,human AV,model AV,"cosine(Dm, Dh) V->AV"
+1040_DFA_HAP_XX,Happy,10/9/10,Hap 1.00,Hap 0.90 Neu 0.08,Hap 0.44 Neu 0.44 Sad 0.11,Hap 0.41 Neu 0.45,Hap 0.70 Neu 0.30,Hap 0.93 Neu 0.05,-1.0
+1091_MTI_DIS_XX,Disgust,8/10/10,Dis 0.50 Fea 0.12 Sad 0.38,Ang 0.09 Dis 0.67 Fea 0.09 Sad 0.12,Fea 0.30 Neu 0.50 Sad 0.20,Dis 0.08 Fea 0.12 Neu 0.46 Sad 0.31,Ang 0.10 Dis 0.80 Fea 0.10,Dis 0.50 Fea 0.16 Neu 0.06 Sad 0.25,-0.92
+1038_TIE_NEU_XX,Neutral,10/11/10,Ang 0.10 Dis 0.20 Neu 0.70,Ang 0.08 Dis 0.09 Hap 0.13 Neu 0.60 Sad 0.07,Ang 0.09 Dis 0.09 Fea 0.09 Hap 0.09 Neu 0.64,Dis 0.05 Hap 0.07 Neu 0.78,Ang 0.10 Dis 0.30 Fea 0.10 Neu 0.30 Sad 0.20,Hap 0.08 Neu 0.85,-0.91
+1083_ITH_ANG_XX,Anger,10/10/11,Ang 0.40 Dis 0.60,Ang 0.51 Dis 0.38,Ang 0.50 Dis 0.40 Neu 0.10,Ang 0.35 Dis 0.43 Neu 0.12,Ang 0.73 Dis 0.18 Fea 0.09,Ang 0.48 Dis 0.46,-0.87
+1058_ITH_SAD_XX,Sad,10/10/10,Dis 0.50 Fea 0.10 Sad 0.40,Dis 0.11 Fea 0.20 Neu 0.07 Sad 0.60,Dis 0.10 Fea 0.20 Neu 0.40 Sad 0.30,Dis 0.16 Fea 0.16 Neu 0.34 Sad 0.31,Fea 0.40 Sad 0.60,Dis 0.18 Fea 0.20 Neu 0.05 Sad 0.56,-0.87
+1033_IEO_FEA_LO,Fear,11/11/9,Dis 0.18 Fea 0.64 Neu 0.18,Ang 0.13 Dis 0.09 Fea 0.46 Neu 0.20 Sad 0.11,Dis 0.09 Neu 0.45 Sad 0.45,Dis 0.11 Fea 0.08 Neu 0.55 Sad 0.21,Fea 1.00,Dis 0.13 Fea 0.37 Neu 0.29 Sad 0.16,-0.73
