@@ -52,6 +52,7 @@ def main() -> None:
     parser.add_argument("--runs", type=Path, default=Path("results/stage1"))
     parser.add_argument("--zero-shot", type=Path, default=Path("results/cremad_qwen/scores.jsonl"))
     parser.add_argument("--out", type=Path, default=Path("results/vonly_compare"))
+    parser.add_argument("--extra", nargs="*", default=[], help="name=path of further video-only predictions (scores.jsonl, condition V)")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -79,6 +80,9 @@ def main() -> None:
             budget.append({"arm": arm, "readings trained per clip": readings, "V loss weight": weight,
                            "V-supervised clips (3 folds, 1 epoch)": clips if arm != "m3" else 0, "optimizer steps (3 folds)": steps,
                            "GPU hours logged (last session per fold)": round(hours, 1)})
+    for item in args.extra:
+        name, path = item.split("=", 1)
+        arms[name] = read_scores(Path(path))
     common = sorted(set(df.index[df.v_n > 0]).intersection(*(set(a.index) for a in arms.values())))
     d = df.loc[common]
     P = counts(d, "v")
@@ -108,15 +112,20 @@ def main() -> None:
         rows.append({"predictor": label, "JSD to V votes": f"{np.mean(js):.3f}", "mean H(q)": f"(human {hp.mean():.3f})"})
     tables = {"v_reading": pd.DataFrame(rows)}
     rows = []
-    for ref in ("s1_noI", "m3"):
-        if "v_only" in Q and ref in Q:
-            a, b = metrics(Q["v_only"]), metrics(Q[ref])
-            rows.append({"comparison": f"v_only minus {ref}", **{k: boot(lambda i, k=k: a[k](i) - b[k](i)) for k in a},
-                         **{f"JSD fold {f}": round(float(jsd(Q['v_only'], P)[folds == f].mean() - jsd(Q[ref], P)[folds == f].mean()), 3)
+    pairs = [("v_only", "s1_noI"), ("v_only", "m3")] + [(name.split("=")[0], "v_only") for name in args.extra]
+    for new, ref in pairs:
+        if new in Q and ref in Q:
+            a, b = metrics(Q[new]), metrics(Q[ref])
+            rows.append({"comparison": f"{new} minus {ref}", **{k: boot(lambda i, k=k: a[k](i) - b[k](i)) for k in a},
+                         **{f"JSD fold {f}": round(float(jsd(Q[new], P)[folds == f].mean() - jsd(Q[ref], P)[folds == f].mean()), 3)
                             for f in range(N_OUTER)}})
     if rows:
         tables["paired"] = pd.DataFrame(rows)
     tables["training_budget"] = pd.DataFrame(budget)
+    tables["by_emotion"] = pd.DataFrame([{"intended emotion": e, "clips": int((emo == e).sum()), "human mean H": round(float(hp[emo == e].mean()), 3),
+                                          **{f"{n}: JSD": round(float(jsd(q, P)[emo == e].mean()), 3) for n, q in Q.items()},
+                                          **{f"{n}: mean H": round(float(norm_entropy(q)[emo == e].mean()), 3) for n, q in Q.items()}}
+                                         for e in sorted(set(emo))])
 
     # ---- metric diagnostic: s1_noI's A and AV readings kept, its V reading replaced by v_only's ----------------
     # "AV disambiguation" = H(AV) < min(H(V), H(A)) - 0.05 (cross_condition_diagnostic.py). Not a fusion model:

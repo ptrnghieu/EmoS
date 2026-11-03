@@ -92,6 +92,9 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
 17. **Cross-condition diagnostic** (no training): `cross_condition_diagnostic.py` on the Stage 1 outer runs (m3, s1_noI).
 18. **V-only control**: `kaggle/stage1_cremad.ipynb` with `ARM = v_only`, `PHASE = outer`, `FOLD` = 0, 1, 2 (A0 input);
     copy `stage1_v_only_f*_s0` to `results/stage1/`, then run `vonly_compare.py`.
+19. **Dedicated visual baseline (HSEmotion)**: `kaggle/hsemotion_features.ipynb` (CPU; `cremad_mm/` and `cremad_views/`
+    attached) writes `hsemotion_features/`; copy it to `results/`, run `hsemotion_head.py`, then
+    `vonly_compare.py --extra hse_linear=results/hsemotion_head/linear/scores.jsonl hse_mlp=results/hsemotion_head/mlp/scores.jsonl hse_zeroshot=results/hsemotion_head/zeroshot/scores.jsonl`.
 
 ## Note on clip ids
 

@@ -3383,6 +3383,149 @@ training), `s3_norank` (no ranking loss), `s3_noV` (no V reading). Scored readin
     return cells
 
 
+# ---- Dedicated visual baseline: HSEmotion frame features on the A2 face crops (CPU) ------------------------
+
+HSEMOTION = [
+    md(r"""
+# HSEmotion features of the CREMA-D face crops (Kaggle, CPU only)
+
+Frozen HSEmotion EfficientNet-B0 (`enet_b0_8_best_afew`; face recognition pretraining on VGGFace2, then facial
+expressions on AffectNet, as published by its authors) applied to every A2 face crop (`cremad_views/faces/`, the A0
+timestamps, 2 fps). Saved per frame: the 1280-d embedding before the classifier and the checkpoint's 8 logits
+(Anger, Contempt, Disgust, Fear, Happiness, Neutral, Sadness, Surprise). Preprocessing = the library's own: RGB,
+resize to 224 x 224, ImageNet mean/std. The head on these features is trained on a CPU by
+`analysis/hsemotion_head.py`.
+
+**Locked before the outer evaluation:** checkpoint and its sha256 (checked below), `hsemotion==0.3.0`,
+`timm==0.9.16` (the checkpoint is a whole pickled model; newer timm cannot run it), backbone in `eval()` (weights and
+BatchNorm statistics frozen). Every crop frame of a clip is used; an unreadable frame is skipped and counted; a clip with
+no readable frame is kept with `n_frames = 0` (the analysis then predicts the training prior for it).
+
+**Running it**
+1. *Accelerator*: **None**; *Internet*: **on**; *Add input*: `cremad_mm/` and the output of
+   `prep_cremad_views.ipynb` (`cremad_views/`).
+2. **Save & Run All (Commit)**. About 20-40 minutes.
+3. Results: `/kaggle/working/hsemotion_features/` with `features.npz` and `meta.json` (about 100 MB).
+"""),
+    code(r"""
+%pip install -q "hsemotion==0.3.0" "timm==0.9.16"
+"""),
+    code(r"""
+import glob, hashlib, json, os, time, urllib.request, zipfile
+from importlib.metadata import version
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import torch
+from PIL import Image
+from torchvision import transforms
+
+MODEL_NAME = "enet_b0_8_best_afew"
+SHA256 = "47c1423f3e6f50e3750bf7b0eda7db947c9ce0c2637e1766bf2187eddc652b17"
+URL = f"https://raw.githubusercontent.com/HSE-asavchenko/face-emotion-recognition/main/models/affectnet_emotions/{MODEL_NAME}.pt"
+CLASSES = ["Anger", "Contempt", "Disgust", "Fear", "Happiness", "Neutral", "Sadness", "Surprise"]  # hsemotion's 8-class order
+BATCH = 64
+LIMIT = None                 # e.g. 20 for a quick check
+OUT_DIR = Path(os.environ.get("OUT_DIR", "/kaggle/working/hsemotion_features"))
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+torch.set_num_threads(os.cpu_count())
+
+DATA_DIR = os.environ.get("CREMAD_MM_DIR")
+if DATA_DIR is None:
+    DATA_DIR = os.path.dirname([h for k in range(9) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "cremad_mm/manifest.csv"))][0])
+VIEWS_DIR = os.environ.get("CREMAD_VIEWS_DIR")
+if VIEWS_DIR is None:
+    hits = [h for k in range(9) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "cremad_views/views.csv"))]
+    if not hits:  # attached as an archive that was not unpacked
+        for z in (h for k in range(9) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "*.zip"))):
+            with zipfile.ZipFile(z) as zf:
+                names = [n for n in zf.namelist() if n.endswith("cremad_views/views.csv") or n == "views.csv"]
+                if names:
+                    zf.extractall("/tmp/cremad_views_unzip")
+                    hits = [os.path.join("/tmp/cremad_views_unzip", names[0])]
+                    break
+    assert hits, "No cremad_views/views.csv under /kaggle/input: attach the output of prep_cremad_views.ipynb."
+    VIEWS_DIR = os.path.dirname(hits[0])
+DATA_DIR, VIEWS_DIR = Path(DATA_DIR), Path(VIEWS_DIR)
+print("data:", DATA_DIR, "| views:", VIEWS_DIR, "| versions:", {p: version(p) for p in ("hsemotion", "timm", "torch")})
+"""),
+    md("## The checkpoint (verified by its sha256)"),
+    code(r"""
+path = Path.home() / ".hsemotion" / f"{MODEL_NAME}.pt"
+path.parent.mkdir(exist_ok=True)
+if not path.exists():
+    urllib.request.urlretrieve(URL, path)
+digest = hashlib.sha256(path.read_bytes()).hexdigest()
+assert digest == SHA256, f"checkpoint sha256 {digest} differs from the locked {SHA256}"
+model = torch.load(path, weights_only=False, map_location="cpu")  # a whole pickled model (the library loads it the same way)
+head = model.classifier[0] if isinstance(model.classifier, torch.nn.Sequential) else model.classifier
+W, b = head.weight.detach().clone(), head.bias.detach().clone()
+model.classifier = torch.nn.Identity()
+model.eval()
+for p_ in model.parameters():
+    p_.requires_grad_(False)
+tf = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor(),
+                         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+print("sha256 ok | classifier", tuple(W.shape))
+"""),
+    md("## Clips and their face crops"),
+    code(r"""
+manifest = pd.read_csv(DATA_DIR / "manifest.csv", dtype={"video_id": str})
+views = pd.read_csv(VIEWS_DIR / "views.csv")
+clips = manifest[manifest["status"] == "ok"][["uid"]].merge(views, on="uid", how="left")
+print(f"{len(clips)} clips | view status:", clips["status"].fillna("missing").value_counts().to_dict(),
+      "| clips with a fallback (central) crop:", int((clips["status"] == "face_fallback").sum()))
+if LIMIT:
+    clips = clips.head(LIMIT)
+"""),
+    md("## Frame features and logits"),
+    code(r"""
+uids, lengths, feats, logits, bad_frames = [], [], [], [], 0
+pending, owners, t0 = [], [], time.time()
+
+
+def run(batch):
+    with torch.inference_mode():
+        f = model(torch.stack(batch))
+    return f.numpy().astype(np.float16), (f @ W.T + b).numpy().astype(np.float32)
+
+
+per_clip = []
+for j, row in enumerate(clips.itertuples()):
+    frames = sorted(glob.glob(str(VIEWS_DIR / str(row.faces_dir) / "*.jpg"))) if isinstance(row.faces_dir, str) else []
+    imgs = []
+    for fpath in frames:
+        try:
+            imgs.append(tf(Image.open(fpath).convert("RGB")))
+        except Exception:
+            bad_frames += 1
+    per_clip.append((row.uid, imgs))
+    if sum(len(x[1]) for x in per_clip) >= BATCH or j == len(clips) - 1:
+        flat = [im for _, ims in per_clip for im in ims]
+        f, lg = run(flat) if flat else (np.zeros((0, 1280), np.float16), np.zeros((0, 8), np.float32))
+        k = 0
+        for uid, ims in per_clip:
+            uids.append(uid)
+            lengths.append(len(ims))
+            feats.append(f[k:k + len(ims)])
+            logits.append(lg[k:k + len(ims)])
+            k += len(ims)
+        per_clip = []
+    if (j + 1) % 1000 == 0:
+        print(f"{j + 1}/{len(clips)} clips | {(time.time() - t0) / (j + 1):.2f} s/clip")
+np.savez(OUT_DIR / "features.npz", uid=np.array(uids), lengths=np.array(lengths, np.int32),
+         feats=np.concatenate(feats), logits=np.concatenate(logits))
+(OUT_DIR / "meta.json").write_text(json.dumps({
+    "model": MODEL_NAME, "sha256": SHA256, "url": URL, "classes": CLASSES, "embedding": "EfficientNet-B0 pooled, before the classifier",
+    "preprocessing": "RGB, Resize((224, 224)), ToTensor, Normalize(ImageNet mean/std)", "input": "cremad_views/faces (A2, A0 timestamps)",
+    "versions": {p: version(p) for p in ("hsemotion", "timm", "torch", "torchvision")}, "clips": len(uids),
+    "clips_without_frames": int(sum(l == 0 for l in lengths)), "unreadable_frames": bad_frames,
+    "frames_per_clip_median": float(np.median(lengths))}, indent=1))
+print(json.loads((OUT_DIR / "meta.json").read_text()))
+"""),
+]
+
+
 # ---- Experiment B (+ A): visual representations probed for the video-only raters' votes ---------------
 
 PREP_VIEWS = [
@@ -3754,3 +3897,4 @@ if __name__ == "__main__":
     write(HERE / "prep_cremad_views.ipynb", PREP_VIEWS)
     write(HERE / "stage3_cremad.ipynb", stage3_cells())
     write(HERE / "probe_visual.ipynb", [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in PROBE_VISUAL])
+    write(HERE / "hsemotion_features.ipynb", HSEMOTION)
