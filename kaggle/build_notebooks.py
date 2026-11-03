@@ -3594,6 +3594,8 @@ plus the six label logits (the model's own prediction). Probes are trained on a 
 **Settings** (config cell)
 - `MODEL_KIND`: `base` (zero-shot; main result; every clip) or `m3` / `s1_noI` (Stage 1 adapters, seed 0; only the
   actors of fold `FOLD`, which that adapter never saw in training).
+  `v_only` (the Stage 1 V-only control, seed 0): every clip is read with fold `FOLD`'s adapter, so that a head can be
+  fitted on that fold's training actors and tested on its held-out actors; runs are named `vprobe_v_only_A0_f<FOLD>_all`.
 - `VIEW`: `A0` (2 fps, full frame; as in all runs so far), `A1` (4 fps), `A2` (face crops), `A3` (full frames + face
   crops, as two videos). The adapters are read with `A0` only.
 - `CONDITION`: `V` (video only; experiment B) or `AV` (video + audio, the prompt of the Stage 1 AV reading; for the
@@ -3616,7 +3618,7 @@ plus the six label logits (the model's own prediction). Probes are trained on a 
 %pip uninstall -y -q torchao
 """),
     code(COMMON_CONFIG + CREMAD_DATA + r"""
-MODEL_KIND = os.environ.get("MODEL_KIND", "base")  # base | m3 | s1_noI
+MODEL_KIND = os.environ.get("MODEL_KIND", "base")  # base | m3 | s1_noI | v_only
 FOLD = int(os.environ.get("FOLD", 0))              # m3 / s1_noI: the outer fold whose actors are read
 VIEW = os.environ.get("VIEW", "A0")                # A0 | A1 | A2 | A3
 CONDITION = os.environ.get("CONDITION", "V")       # V: video only (experiment B) | AV: video + audio (Stage C readouts)
@@ -3628,10 +3630,13 @@ LORA_TARGETS = r"^model\.layers\.\d+\.self_attn\.(q|k|v|o)_proj$"
 SHARD = 250
 TIME_BUDGET_H = 11.0
 LIMIT = None                 # e.g. 10 for a quick check
-assert MODEL_KIND in ("base", "m3", "s1_noI") and VIEW in ("A0", "A1", "A2", "A3") and 0 <= FOLD < N_OUTER
+assert MODEL_KIND in ("base", "m3", "s1_noI", "v_only") and VIEW in ("A0", "A1", "A2", "A3") and 0 <= FOLD < N_OUTER
+# v_only: every clip is read with fold FOLD's adapter (its training actors to fit a head, its held-out actors to test it)
+ALL_CLIPS = MODEL_KIND == "v_only"
+assert not ALL_CLIPS or CONDITION == "V", "v_only is read under V only"
 assert MODEL_KIND == "base" or VIEW == "A0", "the adapters were trained on A0 and are read with A0 only"
 assert CONDITION in ("V", "AV") and (CONDITION == "V" or VIEW == "A0"), "AV is read with A0 only"
-RUN_NAME = f"vprobe_{MODEL_KIND}_{VIEW}" + ("_AV" if CONDITION == "AV" else "") + ("" if MODEL_KIND == "base" else f"_f{FOLD}")
+RUN_NAME = f"vprobe_{MODEL_KIND}_{VIEW}" + ("_AV" if CONDITION == "AV" else "") + ("" if MODEL_KIND == "base" else f"_f{FOLD}") + ("_all" if ALL_CLIPS else "")
 OUT_DIR = Path(os.environ.get("OUT_DIR", f"/kaggle/working/{RUN_NAME}"))
 T_START = time.time()
 
@@ -3741,7 +3746,7 @@ for _, group in actor_sex.groupby(actor_sex):
     for k, a in enumerate(rng.permutation(group.index.to_numpy())):
         outer[int(a)] = k % N_OUTER
 clips["outer_fold"] = clips["actor"].map(outer)
-if MODEL_KIND != "base":
+if MODEL_KIND != "base" and not ALL_CLIPS:
     clips = clips[clips["outer_fold"] == FOLD].reset_index(drop=True)
 if VIEW != "A0":
     views = pd.read_csv(VIEWS_DIR / "views.csv")
@@ -3860,7 +3865,7 @@ for j, (_, row) in enumerate(todo.iterrows()):
               f"video tokens {buf[-1]['n_video_tokens'] if buf else '-'} | peak {peak:.1f} GiB | OOM {n_oom}")
 flush()
 (OUT_DIR / "meta.json").write_text(json.dumps({
-    "model": MODEL_ID, "model_kind": MODEL_KIND, "fold": FOLD if MODEL_KIND != "base" else None, "view": VIEW, "condition": CONDITION,
+    "model": MODEL_ID, "model_kind": MODEL_KIND, "fold": FOLD if MODEL_KIND != "base" else None, "all_clips": ALL_CLIPS, "view": VIEW, "condition": CONDITION,
     "adapter": ADAPTER, "layers": LAYERS, "labels": LABELS, "grid": GRID if SAVE_GRID else None,
     "frame_max_pixels": FRAME_MAX_PIXELS, "oom_this_run": n_oom}, indent=1))
 """),

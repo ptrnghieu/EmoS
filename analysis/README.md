@@ -95,6 +95,10 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
 19. **Dedicated visual baseline (HSEmotion)**: `kaggle/hsemotion_features.ipynb` (CPU; `cremad_mm/` and `cremad_views/`
     attached) writes `hsemotion_features/`; copy it to `results/`, run `hsemotion_head.py`, then
     `vonly_compare.py --extra hse_linear=results/hsemotion_head/linear/scores.jsonl hse_mlp=results/hsemotion_head/mlp/scores.jsonl hse_zeroshot=results/hsemotion_head/zeroshot/scores.jsonl`.
+20. **Readout control (Qwen v_only + the HSEmotion head family)**: `kaggle/probe_visual.ipynb` with `MODEL_KIND = v_only`,
+    `FOLD` = 0, 1, 2 (the Stage 1 `stage1_v_only_f<k>_s0` output attached; every clip is read); copy the
+    `vprobe_v_only_A0_f*_all` folders to `results/visual_probe/`, run `qwen_head.py`, then `vonly_compare.py` with
+    `--extra qwen_linear=results/qwen_head/linear/scores.jsonl qwen_mlp=results/qwen_head/mlp/scores.jsonl` beside the HSEmotion heads.
 
 ## Note on clip ids
 
