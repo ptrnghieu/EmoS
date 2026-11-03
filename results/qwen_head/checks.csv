@@ -1,0 +1,4 @@
+fold,clips read,training-actor clips,held-out clips,median |logit diff| vs v_only scores,same top label
+0,7438,4898,2540,0.0,1.0
+1,7438,4990,2448,0.0,1.0
+2,7438,4988,2450,0.0,1.0
