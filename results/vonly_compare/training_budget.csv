@@ -1,0 +1,4 @@
+arm,readings trained per clip,V loss weight,"V-supervised clips (3 folds, 1 epoch)",optimizer steps (3 folds),GPU hours logged (last session per fold)
+m3,AV,0 (not trained),0,1861,13.2
+s1_noI,AV + V + A,0.1,14876,1861,27.5
+v_only,V,1,14876,1861,11.1
