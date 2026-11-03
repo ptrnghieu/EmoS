@@ -1,0 +1,2 @@
+comparison,rate,recall,precision,FPR
+v_only's V minus s1_noI's own V (A and AV readings of s1_noI),"-0.026 [-0.035, -0.017]","-0.033 [-0.046, -0.021]","-0.001 [-0.008, 0.006]","-0.023 [-0.033, -0.014]"
