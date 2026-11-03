@@ -122,6 +122,23 @@ def main() -> None:
     if rows:
         tables["paired"] = pd.DataFrame(rows)
     tables["training_budget"] = pd.DataFrame(budget)
+    # paired differences within each intended emotion: JSD and the within-class Spearman of entropies
+    rows = []
+    for new_, ref in [(name.split("=")[0], "v_only") for name in args.extra] + [("v_only", "s1_noI")]:
+        if new_ not in Q or ref not in Q:
+            continue
+        jn, jr = jsd(Q[new_], P), jsd(Q[ref], P)
+        hn, hr = norm_entropy(Q[new_]), norm_entropy(Q[ref])
+        for e in sorted(set(emo)):
+            sel = np.flatnonzero(emo == e)
+            be = Bootstrap(d.actor.to_numpy()[sel], N_BOOT)
+            rows.append({"comparison": f"{new_} minus {ref}", "intended emotion": e, "clips": len(sel),
+                         "JSD difference": be(lambda i: jn[sel][i].mean() - jr[sel][i].mean()),
+                         "within-class Spearman: first": be(lambda i: spearman(hn[sel][i], hp[sel][i])),
+                         "within-class Spearman: second (reference)": be(lambda i: spearman(hr[sel][i], hp[sel][i])),
+                         "within-class Spearman difference": be(lambda i: spearman(hn[sel][i], hp[sel][i]) - spearman(hr[sel][i], hp[sel][i]))})
+    if rows:
+        tables["by_emotion_paired"] = pd.DataFrame(rows)
     tables["by_emotion"] = pd.DataFrame([{"intended emotion": e, "clips": int((emo == e).sum()), "human mean H": round(float(hp[emo == e].mean()), 3),
                                           **{f"{n}: JSD": round(float(jsd(q, P)[emo == e].mean()), 3) for n, q in Q.items()},
                                           **{f"{n}: mean H": round(float(norm_entropy(q)[emo == e].mean()), 3) for n, q in Q.items()}}
