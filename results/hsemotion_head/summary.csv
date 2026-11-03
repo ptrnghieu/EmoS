@@ -1,0 +1,2 @@
+clips,clips without a usable frame,zero-shot: mean probability on Contempt + Surprise (dropped),"linear JSD (all clips, for orientation)","mlp JSD (all clips, for orientation)","zeroshot JSD (all clips, for orientation)"
+7438,0,0.204,0.125,0.119,0.18

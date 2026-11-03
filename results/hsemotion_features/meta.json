@@ -1,0 +1,28 @@
+{
+ "model": "enet_b0_8_best_afew",
+ "sha256": "47c1423f3e6f50e3750bf7b0eda7db947c9ce0c2637e1766bf2187eddc652b17",
+ "url": "https://raw.githubusercontent.com/HSE-asavchenko/face-emotion-recognition/main/models/affectnet_emotions/enet_b0_8_best_afew.pt",
+ "classes": [
+  "Anger",
+  "Contempt",
+  "Disgust",
+  "Fear",
+  "Happiness",
+  "Neutral",
+  "Sadness",
+  "Surprise"
+ ],
+ "embedding": "EfficientNet-B0 pooled, before the classifier",
+ "preprocessing": "RGB, Resize((224, 224)), ToTensor, Normalize(ImageNet mean/std)",
+ "input": "cremad_views/faces (A2, A0 timestamps)",
+ "versions": {
+  "hsemotion": "0.3.0",
+  "timm": "0.9.16",
+  "torch": "2.11.0+cpu",
+  "torchvision": "0.26.0+cpu"
+ },
+ "clips": 7438,
+ "clips_without_frames": 0,
+ "unreadable_frames": 0,
+ "frames_per_clip_median": 5.0
+}
