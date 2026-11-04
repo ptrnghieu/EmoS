@@ -1,0 +1,25 @@
+uid,condition,max |logit diff| off vs s1_noI,same top label,positions changed,changed = placeholders,last token,mean |logit shift| cue on
+1002_IEO_NEU_XX,AV,0.0078125,True,4,True,"<|im_start|>assistant
+",0.08203125
+1002_IEO_NEU_XX,V,0.0,True,4,True,"<|im_start|>assistant
+",0.1966145783662796
+1002_IEO_HAP_LO,AV,0.015625,True,4,True,"<|im_start|>assistant
+",0.19140625
+1002_IEO_HAP_LO,V,0.0,True,4,True,"<|im_start|>assistant
+",0.36328125
+1002_IEO_HAP_MD,AV,0.0078125,True,4,True,"<|im_start|>assistant
+",0.1015625
+1002_IEO_HAP_MD,V,0.0,True,4,True,"<|im_start|>assistant
+",0.3255208432674408
+1002_IEO_HAP_HI,AV,0.0078125,True,4,True,"<|im_start|>assistant
+",0.1184895858168602
+1002_IEO_HAP_HI,V,0.0,True,4,True,"<|im_start|>assistant
+",0.2473958283662796
+1002_IEO_SAD_LO,AV,0.0078125,True,4,True,"<|im_start|>assistant
+",0.109375
+1002_IEO_SAD_LO,V,0.0,True,4,True,"<|im_start|>assistant
+",0.1178385391831398
+1002_IEO_SAD_MD,AV,0.015625,True,4,True,"<|im_start|>assistant
+",0.1354166716337204
+1002_IEO_SAD_MD,V,0.0,True,4,True,"<|im_start|>assistant
+",0.1419270783662796

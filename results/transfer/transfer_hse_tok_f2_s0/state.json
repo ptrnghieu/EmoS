@@ -1,0 +1,62 @@
+{
+ "arm": "hse_tok",
+ "phase": "outer",
+ "fold": 2,
+ "seed": 0,
+ "lambdas": [
+  0.5,
+  0.0,
+  0.0
+ ],
+ "sizes": [
+  4988,
+  2450
+ ],
+ "start": "stage1_s1_noI_f2_s0",
+ "n_tok": 4,
+ "proj_hidden": 1024,
+ "proj_lr": 0.001,
+ "proj_init_seed": 0,
+ "cue_conds": [
+  "AV",
+  "V"
+ ],
+ "loss_weights": [
+  0.5,
+  0.5,
+  0.0
+ ],
+ "epoch": 1,
+ "pos": 0,
+ "opt_step": 624,
+ "loss_sum": {},
+ "loss_n": 0,
+ "oom": 0,
+ "history": [
+  {
+   "epoch": 0,
+   "train_CE_AV": 1.2144755989368567,
+   "train_CE_V": 1.3848939303562842,
+   "session_hours": 7.68
+  }
+ ],
+ "train_done": true,
+ "rank": {
+  "clips": 0,
+  "pairs": 0,
+  "no_pair": 0,
+  "sentence_level": 0,
+  "delta_bins": [
+   0,
+   0,
+   0
+  ]
+ },
+ "first_step_grad_norms": {
+  "LoRA": 1.495543098758227,
+  "proj fc1.weight": 0.25757321900036445,
+  "proj fc1.bias": 0.006376834721966645,
+  "proj fc2": 0.1578150446035706
+ },
+ "saved_at": 1793791346.7618694
+}

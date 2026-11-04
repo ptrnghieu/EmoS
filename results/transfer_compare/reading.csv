@@ -1,0 +1,4 @@
+comparison,JSD AV (main),partial AV (pre-specified),JSD V,distributions,disagreement ranking,status
+hse_tok minus hse_const,"0.0128 [0.0082, 0.0177]","-0.0816 [-0.1131, -0.0514]","0.0001 [-0.0027, 0.0034]",JSD clearly higher in AV: the first predictor is worse there,partial AV not clearly higher: no evidence of better AV disagreement ranking,locked protocol (3 folds)
+hse_tok minus s1_noI (start),"0.0102 [0.0059, 0.0148]","-0.0773 [-0.1087, -0.0457]","-0.0098 [-0.0127, -0.0066]",only JSD V clearly lower: the benefit is shown for the visual reading only,partial AV not clearly higher: no evidence of better AV disagreement ranking,locked protocol (3 folds)
+hse_const minus s1_noI (start),"-0.0026 [-0.0034, -0.0019]","0.0043 [-0.0026, 0.0122]","-0.0099 [-0.0115, -0.0080]",JSD V and AV both clearly lower: better reproduction of the vote distributions in both conditions,partial AV not clearly higher: no evidence of better AV disagreement ranking,locked protocol (3 folds)
