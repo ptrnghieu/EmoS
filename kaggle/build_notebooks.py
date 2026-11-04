@@ -3383,6 +3383,336 @@ training), `s3_norank` (no ranking loss), `s3_noV` (no V reading). Scored readin
     return cells
 
 
+# ---- Transfer pilot: frozen HSEmotion features as extra tokens in Qwen, continued from s1_noI ------------------
+
+TRANSFER_HEAD = md(r"""
+# Transfer pilot on CREMA-D: frozen HSEmotion features as four extra tokens in Qwen (Kaggle, 2× T4)
+
+**Question.** Does Qwen reproduce the viewers' vote distributions better when it also receives the frozen HSEmotion
+features of the clip, compared with the same model trained further on the same budget without clip-specific
+information in those tokens? A hypothesis test, not a proposed architecture. (Design locked 04/11/2026.)
+
+**Arms** (`ARM`), identical except for the projector's input:
+- `hse_tok`: the projector receives the clip's HSEmotion feature (mean and SD over the A2 face-crop frames, 2560-d,
+  standardised with the training actors' clips of this fold).
+- `hse_const`: the projector receives the zero vector. This is *continued training with extra tokens that carry no
+  clip-specific information*, not continued training with the original prompt. With z = 0 the gradient to the first
+  layer's weights is zero; its bias and the later layer still learn.
+
+Both arms have the same architecture, number of tokens and optimisation budget; they differ in whether the projector
+receives the clip's features.
+
+**Locked settings.**
+- Start: the `s1_noI` adapter of the same outer fold (`stage1_s1_noI_f<FOLD>_s0/last`), same in both arms.
+- Projector: `2560 -> 1024 -> GELU -> 4 x 3584` (bias kept), the same initialisation in both arms (fixed seed), then a
+  fixed scale = RMS of the text-token embeddings / RMS of the initial projector output on this fold's training
+  features (computed from the real features in both arms, so the same number; never re-normalised per clip).
+- Insertion: in the user turn, after the whole video (and audio) block and before the question:
+  `Facial expression cues: <4 placeholder tokens>` + newline. The placeholder (`<|quad_start|>`) is one ordinary text
+  token for the processor, so `input_ids`, the attention mask and the 3-D position ids are built by the unchanged
+  pipeline; a hook on the input embedding replaces the embeddings at exactly those four positions. The A reading has
+  no video and no cue.
+- Loss per clip: `L_i = 1/2 CE(p_AV, q_AV) + 1/2 CE(p_V, q_V)`; A not in the loss. Batch: 8 clips per optimizer step
+  (as Stage 1), so the number of steps is that of one epoch of clips.
+- One extra epoch, last checkpoint, seed 0, the clip order of Stage 1 seed 0. Fresh AdamW and scheduler (LoRA LR
+  1e-4, projector LR 1e-3, weight decay 0, linear warm-up over 3% of the steps then linear decay to 0, gradient
+  clipping at norm 1 over all trained parameters). LoRA as Stage 1 (rank 16, language-model attention).
+- Scored: the held-out actors of the fold under AV, V (with the cue) and A (drift check).
+- Checks (`hse_tok` only, held-out actors, AV and V): the features **permuted between clips** (a fixed-seed cyclic
+  permutation, no labels used) and the **zero input**.
+
+**Checks printed during the run.** Before training: the start adapter with the insertion switched off reproduces the
+`s1_noI` scores of the same clips; exactly four positions are replaced. First optimizer step: gradient norms of the
+LoRA and projector parameters (`hse_const`: zero for the first layer's weights).
+
+**Reading (fixed before the run; `analysis/transfer_compare.py`).** Paired actor bootstrap, `hse_tok - hse_const`,
+pooled over the three folds. Main metric of the pilot: JSD to the AV votes. Pre-specified for the disagreement
+target: partial Spearman (given the intended emotion) of the AV entropy with A^AV. Also JSD V, and both arms against
+`s1_noI`. Fold 0 checks that the run works; if held-out scores are looked at and LR, tokens or epochs are then
+changed, that run is exploratory and is not pooled with the locked protocol.
+
+**Running it** (one notebook run per arm and fold; fold 0 first)
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: `cremad_mm/` (output of `prep_cremad.ipynb`), the
+   output of the `s1_noI` Stage 1 run of the same fold (holds `stage1_s1_noI_f<FOLD>_s0/`), and the output of
+   `hsemotion_features.ipynb` (holds `hsemotion_features/features.npz`).
+2. Set `ARM` and `FOLD` in the config cell. Optional first: `LIMIT = 10`, run all, send the check lines.
+3. **Save & Run All (Commit)**. Expected about 7-8 h of training plus about 2-4 h of scoring and checks; if it stops
+   at `TIME_BUDGET_H`, attach this notebook's own output and commit again (it resumes).
+4. Results: `/kaggle/working/transfer_<ARM>_f<FOLD>_s0/` with `scores.jsonl`, `scores_checks.jsonl` (`hse_tok`),
+   `start_check.csv`, `state.json` and `projector_init.pt`.
+""")
+
+TRANSFER_CONFIG = r"""
+# ---- transfer pilot (locked) ----
+N_TOK, PROJ_HIDDEN, PROJ_LR, PROJ_INIT_SEED, PERM_SEED = 4, 1024, 1e-3, 0, 0
+PLACEHOLDER = "<|quad_start|>"   # one text token for the processor, not used by the multimodal position logic
+CUE_CONDS = ("AV", "V")          # readings that get the cue; () switches the insertion off (original prompt)
+CUE = "Facial expression cues: " + PLACEHOLDER * N_TOK + "\n"
+START_ARM = "s1_noI"
+N_START_CHECK = 6                # held-out clips (x AV, V) re-read with the start adapter and the insertion off
+
+START_ADAPTER = os.environ.get("START_ADAPTER")
+if START_ADAPTER is None:
+    name = f"stage1_{START_ARM}_f{FOLD}_s0"
+    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + f"{name}/last/adapter.pt"))]
+    assert hits, f"No {name}/last/adapter.pt under /kaggle/input: attach the output of that Stage 1 run."
+    START_ADAPTER = hits[0]
+START_ADAPTER = Path(START_ADAPTER)
+st = json.loads((START_ADAPTER.parent.parent / "state.json").read_text())
+assert (st["arm"], st["phase"], st["fold"], st["seed"], st["train_done"]) == (START_ARM, "outer", FOLD, 0, True), st
+HSE_FEATURES = os.environ.get("HSE_FEATURES")
+if HSE_FEATURES is None:
+    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + "hsemotion_features/features.npz"))]
+    assert hits, "No hsemotion_features/features.npz under /kaggle/input: attach the output of hsemotion_features.ipynb."
+    HSE_FEATURES = hits[0]
+HSE_FEATURES = Path(HSE_FEATURES)
+hse_meta = json.loads((HSE_FEATURES.parent / "meta.json").read_text())
+assert hse_meta["sha256"] == "47c1423f3e6f50e3750bf7b0eda7db947c9ce0c2637e1766bf2187eddc652b17", hse_meta
+print("start adapter:", START_ADAPTER, "| HSEmotion features:", HSE_FEATURES)
+"""
+
+TRANSFER_START = code(r"""
+# Start from the s1_noI adapter of this fold (resuming later loads this run's own checkpoint over it).
+res = set_peft_model_state_dict(model, torch.load(START_ADAPTER, map_location="cpu"))
+assert not getattr(res, "unexpected_keys", []), res.unexpected_keys
+print("loaded start adapter", START_ADAPTER)
+
+# Hook on the input embedding: replace the embeddings at the placeholder positions with the projector's tokens.
+PH_ID = processor.tokenizer.convert_tokens_to_ids(PLACEHOLDER)
+assert processor.tokenizer.encode(CUE, add_special_tokens=False).count(PH_ID) == N_TOK
+INJECT = {"tok": None, "n_replaced": []}
+embed = base.get_input_embeddings()
+
+
+def inject(module, args, out):
+    mask = args[0] == PH_ID
+    tok = INJECT["tok"]
+    if tok is None:
+        assert not mask.any(), "placeholder in the prompt but no tokens to insert"
+        return out
+    assert int(mask.sum()) == N_TOK, f"expected {N_TOK} placeholder positions, found {int(mask.sum())}"
+    INJECT["n_replaced"].append(int(mask.sum()))
+    out = out.clone()
+    out[mask] = tok.to(out.device, out.dtype)
+    return out
+
+
+embed.register_forward_hook(inject)
+EMB_DEVICE = embed.weight.device
+""")
+
+TRANSFER_FEATURES = code(r"""
+# HSEmotion clip features: mean and SD over the face-crop frames (as analysis/hsemotion_head.py), standardised with
+# the statistics of this fold's training clips.
+z = np.load(HSE_FEATURES, allow_pickle=False)
+starts = np.concatenate([[0], np.cumsum(z["lengths"])[:-1]])
+frames = z["feats"].astype(np.float32)
+POOLED = {u: np.concatenate([frames[s:s + n].mean(0), frames[s:s + n].std(0)])
+          for u, s, n in zip(z["uid"].tolist(), starts, z["lengths"]) if n > 0}
+missing = [u for u in pd.concat([train_df, eval_df])["uid"] if u not in POOLED]
+assert not missing, f"{len(missing)} clips without HSEmotion features, e.g. {missing[:5]}"
+Ztr = np.stack([POOLED[u] for u in train_df["uid"]])
+F_MU, F_SD = Ztr.mean(0), Ztr.std(0) + 1e-6
+D_IN = Ztr.shape[1]
+
+
+def feature(row):
+    # projector input of the clip: its standardised features (hse_tok) or the zero vector (hse_const)
+    if ARM == "hse_const":
+        return torch.zeros(D_IN, device=EMB_DEVICE)
+    return torch.from_numpy((POOLED[row["uid"]] - F_MU) / F_SD).float().to(EMB_DEVICE)
+
+
+class Projector(torch.nn.Module):
+    def __init__(self, d_in, d_hid, n_tok, d_out):
+        super().__init__()
+        self.fc1 = torch.nn.Linear(d_in, d_hid)
+        self.act = torch.nn.GELU()
+        self.fc2 = torch.nn.Linear(d_hid, n_tok * d_out)
+        self.register_buffer("scale", torch.ones(()))
+        self.n_tok, self.d_out = n_tok, d_out
+
+    def forward(self, x):
+        return (self.fc2(self.act(self.fc1(x))) * self.scale).view(self.n_tok, self.d_out)
+
+
+with torch.random.fork_rng(devices=[]):  # same initialisation in both arms; leaves the global random state unchanged
+    torch.manual_seed(PROJ_INIT_SEED)
+    projector = Projector(D_IN, PROJ_HIDDEN, N_TOK, hidden_size)
+projector = projector.to(EMB_DEVICE, torch.float32)
+with torch.no_grad():  # fixed scale from the real training features (both arms) and the text-token embeddings
+    W = embed.weight
+    n_text = processor.tokenizer.convert_tokens_to_ids("<|endoftext|>")  # ordinary tokens come before the specials
+    rms_text = torch.sqrt(sum(W[i:i + 8192].float().pow(2).sum() for i in range(0, n_text, 8192)) / (n_text * W.shape[1]))
+    Zs = torch.from_numpy((Ztr - F_MU) / F_SD).float()
+    sq = sum(projector.fc2(projector.act(projector.fc1(Zs[i:i + 512].to(EMB_DEVICE)))).pow(2).sum() for i in range(0, len(Zs), 512))
+    rms_proj = torch.sqrt(sq / (len(Zs) * N_TOK * hidden_size))
+    projector.scale.fill_(float(rms_text / rms_proj))
+proj_params = list(projector.parameters())
+init_sum = float(sum(p.detach().double().abs().sum() for p in proj_params))
+TRANSFER_IDENT = {"start": str(START_ADAPTER.parent.parent.name), "n_tok": N_TOK, "proj_hidden": PROJ_HIDDEN,
+                  "proj_lr": PROJ_LR, "proj_init_seed": PROJ_INIT_SEED, "cue_conds": list(CUE_CONDS),
+                  "loss_weights": [LAMBDA_AV, LAMBDA_V, LAMBDA_A]}
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+if not (OUT_DIR / "projector_init.pt").exists():
+    torch.save(projector.state_dict(), OUT_DIR / "projector_init.pt")
+print(f"features {D_IN}-d for {len(POOLED)} clips | projector {sum(p.numel() for p in proj_params) / 1e6:.1f} M params | "
+      f"init checksum {init_sum:.4f} (must be the same in both arms) | RMS text {float(rms_text):.5f}, "
+      f"initial projector output {float(rms_proj):.5f}, scale {float(projector.scale):.5f}")
+""")
+
+TRANSFER_START_CHECK = code(r"""
+# Before training: (1) the start adapter with the insertion switched off reproduces the s1_noI scores of the same
+# held-out clips; (2) with the insertion on, only the four placeholder positions change.
+ref = pd.DataFrame([json.loads(l) for l in open(START_ADAPTER.parent.parent / "scores.jsonl", encoding="utf-8") if l.strip()])
+ref = ref[ref.get("error", pd.Series(index=ref.index, dtype=object)).isna()]
+ref = ref.drop_duplicates(["uid", "condition"], keep="last").set_index(["uid", "condition"])
+lcols = [f"logit_{l}" for l in LABELS]
+CAPTURE = {}
+cap = base.model.register_forward_pre_hook(lambda m, a, kw: CAPTURE.__setitem__("emb", kw["inputs_embeds"].detach().clone()), with_kwargs=True)
+rows, saved_conds = [], CUE_CONDS
+model.eval()
+for _, row in eval_df[eval_df["uid"].isin(ref.index.get_level_values(0))].head(N_START_CHECK).iterrows():
+    for c in ("AV", "V"):
+        with torch.inference_mode():
+            CUE_CONDS = ()
+            off = reading(row, c)[0][label_first_ids].cpu().numpy()
+            CUE_CONDS = saved_conds
+            inputs = prepare(build_messages(row, c))
+            ids = inputs["input_ids"][0]
+            INJECT["tok"] = torch.zeros(N_TOK, hidden_size, device=EMB_DEVICE)
+            model(**inputs, use_cache=False)
+            e0 = CAPTURE["emb"][0]
+            INJECT["tok"] = projector(feature(row))
+            on = model(**inputs, use_cache=False).logits[0, -1].float()[label_first_ids].cpu().numpy()
+            e1 = CAPTURE["emb"][0]
+            INJECT["tok"] = None
+        changed = (e1 != e0).any(-1).cpu()
+        r = ref.loc[(row["uid"], c), lcols].to_numpy(float)
+        rows.append({"uid": row["uid"], "condition": c, "max |logit diff| off vs s1_noI": float(np.abs(off - r).max()),
+                     "same top label": bool(off.argmax() == r.argmax()),
+                     "positions changed": int(changed.sum()), "changed = placeholders": bool(torch.equal(changed, (ids == PH_ID).cpu())),
+                     "last token": processor.tokenizer.decode(ids[-3:]), "mean |logit shift| cue on": float(np.abs(on - off).mean())})
+cap.remove()
+CUE_CONDS = saved_conds
+model.train()
+check = pd.DataFrame(rows)
+check.to_csv(OUT_DIR / "start_check.csv", index=False)
+print(check.to_string())
+assert len(check), "no held-out clip of this fold in the start run's scores"
+assert check["max |logit diff| off vs s1_noI"].median() < 0.05 and check["same top label"].all(), "insertion off does not reproduce s1_noI"
+assert (check["positions changed"] <= N_TOK).all() and check["changed = placeholders"].all(), "positions other than the placeholders changed"
+""")
+
+
+def transfer_cells():
+    cells = [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in STAGE1]
+    src = [c["source"] if isinstance(c["source"], str) else "".join(c["source"]) for c in cells]
+    find = lambda s: next(k for k, x in enumerate(src) if s in x)
+    i_cfg, i_load, i_prompt = find('ARM = os.environ.get("ARM", "s1")'), find("class IntensityHeads"), find("def build_messages")
+    i_data, i_loss, i_ckpt = find("rng = np.random.default_rng(SPLIT_SEED)"), find("def train_clip"), find("def save_checkpoint")
+    i_train, i_score, i_quick = find("def train():"), find('SCORES = OUT_DIR / "scores.jsonl"'), find('print(state["history"])')
+    cfg = _patched(
+        cells[i_cfg],
+        ('ARM = os.environ.get("ARM", "s1")            # m3 | s1 | s1_noI | s1_avlab | v_only | s3 | s3_frozenvis | s3_norank | s3_noV',
+         'ARM = os.environ.get("ARM", "hse_tok")       # hse_tok | hse_const (projector input = the zero vector)'),
+        ('LAMBDA_V = float(os.environ.get("LAMBDA_V", 0.1 if S3 else 0.25))\nif ARM == "v_only":  # the V task alone, weight 1\n'
+         '    LAMBDA_V = 1.0\nLAMBDA_A = float(os.environ.get("LAMBDA_A", 0.25))',
+         'LAMBDA_AV, LAMBDA_V, LAMBDA_A = 0.5, 0.5, 0.0  # per clip: 1/2 CE_AV + 1/2 CE_V; A not in the loss'),
+        ('LAMBDA_I = 0.0 if ARM in ("m3", "s1_noI", "s1_avlab", "v_only") or S3 else float(os.environ.get("LAMBDA_I", 0.1))',
+         'LAMBDA_I = 0.0'),
+        ('assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "v_only", "s3", "s3_frozenvis", "s3_norank", "s3_noV")',
+         'assert ARM in ("hse_tok", "hse_const")'),
+        ('assert PHASE in ("outer", "inner") and 0 <= FOLD < N_OUTER and VIEW in ("A0", "A1")',
+         'assert PHASE == "outer" and 0 <= FOLD < N_OUTER and VIEW == "A0"'),
+        ('TRAIN_CONDS = ("AV",) if ARM in ("m3", "s3_noV") else ("V",) if ARM == "v_only" else ("AV", "V") if S3 else ("AV", "V", "A")',
+         'TRAIN_CONDS = ("AV", "V")'),
+        ('    RUN_NAME = f"stage1_{ARM}_f{FOLD}_s{SEED}" + (f"_inner_v{LAMBDA_V:g}_a{LAMBDA_A:g}" if PHASE == "inner" else "")',
+         '    RUN_NAME = f"transfer_{ARM}_f{FOLD}_s{SEED}"'),
+        ('print("run:", RUN_NAME, "| view:"', TRANSFER_CONFIG + 'assert SCORE_CONDS == ("AV", "V", "A") and not STAGE3\nprint("run:", RUN_NAME, "| view:"'))
+    prompt = _patched(cells[i_prompt], ('content.append({"type": "text", "text": intro(condition) + ASK})',
+                                        'content.append({"type": "text", "text": (CUE if condition in CUE_CONDS else "") + intro(condition) + ASK})'))
+    loss = _patched(
+        cells[i_loss],
+        ('WEIGHT = {"AV": 1.0, "V": LAMBDA_V, "A": LAMBDA_A}', 'WEIGHT = {"AV": LAMBDA_AV, "V": LAMBDA_V, "A": LAMBDA_A}'),
+        ('def reading(row, condition):\n    inputs = prepare(build_messages(row, condition))\n'
+         '    logits = model(**inputs, use_cache=False).logits[0, -1].float()\n',
+         'def reading(row, condition, x=None):\n    # x: projector input (default: the clip\'s own, see feature); the A reading gets no cue\n'
+         '    inputs = prepare(build_messages(row, condition))\n'
+         '    INJECT["tok"] = projector(feature(row) if x is None else x) if condition in CUE_CONDS else None\n'
+         '    try:\n        logits = model(**inputs, use_cache=False).logits[0, -1].float()\n'
+         '    finally:\n        INJECT["tok"] = None\n'))
+    ckpt = _patched(
+        cells[i_ckpt],
+        ('if merger_params:\n    groups.append({"params": merger_params, "lr": MERGER_LR})',
+         'groups.append({"params": proj_params, "lr": PROJ_LR})\nif merger_params:\n    groups.append({"params": merger_params, "lr": MERGER_LR})'),
+        ('if STAGE3:\n    IDENT.update(view=VIEW', 'IDENT.update(TRANSFER_IDENT)\nif STAGE3:\n    IDENT.update(view=VIEW'),
+        ('    torch.save(heads.state_dict(), folder / "heads.pt")\n',
+         '    torch.save(heads.state_dict(), folder / "heads.pt")\n    torch.save(projector.state_dict(), folder / "projector.pt")\n'),
+        ('    heads.load_state_dict(torch.load(folder / "heads.pt", map_location="cpu"))\n',
+         '    heads.load_state_dict(torch.load(folder / "heads.pt", map_location="cpu"))\n'
+         '    projector.load_state_dict(torch.load(folder / "projector.pt", map_location="cpu"))\n'))
+    train = _patched(
+        cells[i_train],
+        ('            scaler.unscale_(optimizer)\n',
+         '            scaler.unscale_(optimizer)\n'
+         '            if state["opt_step"] == 0:  # first step: gradients reach the LoRA and the projector\n'
+         '                gn = lambda ps: float(sum(p.grad.float().pow(2).sum() for p in ps if p.grad is not None) ** 0.5)\n'
+         '                g = {"LoRA": gn(lora_params), "proj fc1.weight": gn([projector.fc1.weight]),\n'
+         '                     "proj fc1.bias": gn([projector.fc1.bias]), "proj fc2": gn(list(projector.fc2.parameters()))}\n'
+         '                print("first-step gradient norms:", {k: f"{v:.3e}" for k, v in g.items()})\n'
+         '                assert g["LoRA"] > 0 and g["proj fc2"] > 0 and g["proj fc1.bias"] > 0, g\n'
+         '                assert (g["proj fc1.weight"] == 0) == (ARM == "hse_const"), g\n'
+         '                state["first_step_grad_norms"] = g\n'),
+        ('torch.nn.utils.clip_grad_norm_(lora_params + list(heads.parameters()) + list(amb_head.parameters()) + merger_params, 1.0)',
+         'torch.nn.utils.clip_grad_norm_(lora_params + list(heads.parameters()) + list(amb_head.parameters()) + merger_params + proj_params, 1.0)'))
+    checks = code(r"""
+# hse_tok only: the trained model read with (a) the features permuted between held-out clips (fixed-seed cyclic
+# permutation: every clip gets another clip's real features; no labels used) and (b) the zero input. AV and V.
+CHECKS = OUT_DIR / "scores_checks.jsonl"
+n_chk = 0
+if finished and ARM == "hse_tok":
+    model.eval()
+    order = np.random.default_rng(PERM_SEED).permutation(len(eval_df))
+    donor = {eval_df["uid"].iloc[order[i]]: eval_df["uid"].iloc[order[(i + 1) % len(order)]] for i in range(len(order))}
+    done = set()
+    if CHECKS.exists():
+        done = {(r["uid"], r["condition"], r["check"]) for l in open(CHECKS, encoding="utf-8") if l.strip() and "error" not in (r := json.loads(l))}
+    todo = [(row, c, k) for k in ("permuted", "zero") for _, row in eval_df.iterrows() for c in ("AV", "V") if (row["uid"], c, k) not in done]
+    print(f"{len(todo)} check readings to run")
+    for row, c, k in todo:
+        if out_of_time():
+            print("stopped at the time budget: add this notebook's output as an input and commit again")
+            break
+        rec = {"model": TAG, "uid": row["uid"], "condition": c, "task": "score", "check": k, "fold": FOLD}
+        if k == "permuted":
+            rec["feature_uid"] = donor[row["uid"]]
+            x = torch.from_numpy((POOLED[donor[row["uid"]]] - F_MU) / F_SD).float().to(EMB_DEVICE)
+        else:
+            x = torch.zeros(D_IN, device=EMB_DEVICE)
+        try:
+            with torch.inference_mode():
+                logits, _ = reading(row, c, x)
+                rec.update(lse=float(torch.logsumexp(logits, dim=-1)),
+                           **{f"logit_{l}": float(v) for l, v in zip(LABELS, logits[label_first_ids].tolist())})
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            rec["error"] = "oom"
+        with open(CHECKS, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        n_chk += 1
+    print(f"ran {n_chk} check readings this run")
+""")
+    out = [TRANSFER_HEAD] + cells[1:i_cfg] + [cfg] + cells[i_cfg + 1:i_load + 1] + [md("## Start adapter and the insertion hook"), TRANSFER_START] \
+        + cells[i_load + 1:i_prompt] + [prompt] + cells[i_prompt + 1:i_data + 1] \
+        + [md("## HSEmotion features and the projector"), TRANSFER_FEATURES] + cells[i_data + 1:i_loss] + [loss] \
+        + [md("## Checks before training"), TRANSFER_START_CHECK] + cells[i_loss + 1:i_ckpt] + [ckpt] \
+        + cells[i_ckpt + 1:i_train] + [train] + cells[i_train + 1:i_score + 1] \
+        + [md("## Checks: permuted and zero projector input (`hse_tok`)"), checks] + cells[i_score + 1:]
+    assert i_quick == len(cells) - 1
+    return out
+
+
 # ---- Dedicated visual baseline: HSEmotion frame features on the A2 face crops (CPU) ------------------------
 
 HSEMOTION = [
@@ -3901,5 +4231,6 @@ if __name__ == "__main__":
     write(HERE / "stage1_cremad.ipynb", [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in STAGE1])
     write(HERE / "prep_cremad_views.ipynb", PREP_VIEWS)
     write(HERE / "stage3_cremad.ipynb", stage3_cells())
+    write(HERE / "transfer_cremad.ipynb", transfer_cells())
     write(HERE / "probe_visual.ipynb", [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in PROBE_VISUAL])
     write(HERE / "hsemotion_features.ipynb", HSEMOTION)

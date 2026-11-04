@@ -101,6 +101,10 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
     `--extra qwen_linear=results/qwen_head/linear/scores.jsonl qwen_mlp=results/qwen_head/mlp/scores.jsonl` beside the HSEmotion heads.
 21. **Complementarity (HSEmotion + Qwen v_only)**: `combined_head.py` (same inputs as steps 19-20), then `vonly_compare.py`
     with `comb_linear` / `comb_mlp` as `--extra` and `--pairs comb_linear:hse_linear comb_mlp:hse_mlp ...`.
+22. **Transfer pilot (HSEmotion features as extra tokens in Qwen)**: `kaggle/transfer_cremad.ipynb`, `ARM` = `hse_tok` and
+    `hse_const`, `FOLD` = 0 first (pipeline check), then 1 and 2; inputs `cremad_mm/`, the `stage1_s1_noI_f<FOLD>_s0` output and
+    the `hsemotion_features.ipynb` output. Copy the `transfer_*` folders to `results/transfer/`, then `transfer_compare.py`
+    (reading rules fixed in its docstring before the runs).
 
 ## Note on clip ids
 
