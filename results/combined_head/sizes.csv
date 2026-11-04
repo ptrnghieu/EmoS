@@ -1,0 +1,4 @@
+fold,clips,feature dimensions (Qwen + HSEmotion),fit / inner / held-out clips
+0,7438,3584 + 2560,4160 / 738 / 2540
+1,7438,3584 + 2560,4255 / 735 / 2448
+2,7438,3584 + 2560,4250 / 738 / 2450

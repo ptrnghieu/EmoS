@@ -99,6 +99,8 @@ Requirements: Python 3.9+, `pandas`, `openpyxl`, and `ffmpeg`/`ffprobe` on `PATH
     `FOLD` = 0, 1, 2 (the Stage 1 `stage1_v_only_f<k>_s0` output attached; every clip is read); copy the
     `vprobe_v_only_A0_f*_all` folders to `results/visual_probe/`, run `qwen_head.py`, then `vonly_compare.py` with
     `--extra qwen_linear=results/qwen_head/linear/scores.jsonl qwen_mlp=results/qwen_head/mlp/scores.jsonl` beside the HSEmotion heads.
+21. **Complementarity (HSEmotion + Qwen v_only)**: `combined_head.py` (same inputs as steps 19-20), then `vonly_compare.py`
+    with `comb_linear` / `comb_mlp` as `--extra` and `--pairs comb_linear:hse_linear comb_mlp:hse_mlp ...`.
 
 ## Note on clip ids
 

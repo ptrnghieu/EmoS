@@ -53,6 +53,7 @@ def main() -> None:
     parser.add_argument("--zero-shot", type=Path, default=Path("results/cremad_qwen/scores.jsonl"))
     parser.add_argument("--out", type=Path, default=Path("results/vonly_compare"))
     parser.add_argument("--extra", nargs="*", default=[], help="name=path of further video-only predictions (scores.jsonl, condition V)")
+    parser.add_argument("--pairs", nargs="*", default=[], help="further paired comparisons new:reference (predictor names)")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -112,7 +113,8 @@ def main() -> None:
         rows.append({"predictor": label, "JSD to V votes": f"{np.mean(js):.3f}", "mean H(q)": f"(human {hp.mean():.3f})"})
     tables = {"v_reading": pd.DataFrame(rows)}
     rows = []
-    pairs = [("v_only", "s1_noI"), ("v_only", "m3")] + [(name.split("=")[0], "v_only") for name in args.extra]
+    extra_pairs = [tuple(x.split(":", 1)) for x in args.pairs]
+    pairs = [("v_only", "s1_noI"), ("v_only", "m3")] + [(name.split("=")[0], "v_only") for name in args.extra] + extra_pairs
     for new, ref in pairs:
         if new in Q and ref in Q:
             a, b = metrics(Q[new]), metrics(Q[ref])
@@ -124,7 +126,7 @@ def main() -> None:
     tables["training_budget"] = pd.DataFrame(budget)
     # paired differences within each intended emotion: JSD and the within-class Spearman of entropies
     rows = []
-    for new_, ref in [(name.split("=")[0], "v_only") for name in args.extra] + [("v_only", "s1_noI")]:
+    for new_, ref in [(name.split("=")[0], "v_only") for name in args.extra] + [("v_only", "s1_noI")] + extra_pairs:
         if new_ not in Q or ref not in Q:
             continue
         jn, jr = jsd(Q[new_], P), jsd(Q[ref], P)
