@@ -28,6 +28,16 @@ Checks (hse_tok, held-out actors, AV and V): the features permuted between clips
 and the zero input, against the clip's own features. A drop supports use of the match between clip and features;
 neither check by itself shows that the features are used in the intended way.
 
+Exploratory round (05/11/2026; --suffix _rms; arms hse_tok_rms / hse_const_rms, fold 2 only; output tokens
+RMS-normalised to the text-embedding RMS, nothing else changed). Read hse_tok_rms against hse_const_rms only (the
+normalisation also changes how the constant tokens learn), never against the old control, and never pooled with the
+locked runs. Decision, fixed before the runs (direction, size and interval read together; one fold need not exclude 0):
+    training still unstable                          -> stop the token branch for now
+    stable, HSE close to its control on AV JSD and partial AV -> stop; stability fixed, no benefit shown
+    only V improves                                  -> keep the V-benefit statement; no further runs hoping for AV
+    AV JSD and partial AV both favourable            -> run both arms on folds 0-1 with the configuration unchanged
+Fold 2 was chosen because it failed: a recovery there is exploratory evidence only.
+
 References (V only): HSEmotion + head and the feature concatenation (results/hsemotion_head, results/combined_head).
 
 Usage (from the repository root):
@@ -78,21 +88,23 @@ def main() -> None:
     parser.add_argument("--runs", type=Path, default=Path("results/transfer"))
     parser.add_argument("--stage1", type=Path, default=Path("results/stage1"))
     parser.add_argument("--out", type=Path, default=Path("results/transfer_compare"))
+    parser.add_argument("--suffix", default="", help="_rms: the exploratory RMS-normalised arms (never pooled with the locked runs)")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    folds = [f for f in range(N_OUTER) if all((args.runs / f"transfer_{a}_f{f}_s0" / "scores.jsonl").exists() for a in ARMS)]
+    folds = [f for f in range(N_OUTER) if all((args.runs / f"transfer_{a}{args.suffix}_f{f}_s0" / "scores.jsonl").exists() for a in ARMS)]
     assert folds, f"no fold with both arms under {args.runs}"
-    locked = folds == list(range(N_OUTER))
+    locked = folds == list(range(N_OUTER)) and not args.suffix
+    label = f"exploratory configuration (arms *{args.suffix}), folds {folds}; not pooled with the locked result" if args.suffix else None
     df = clip_table().set_index("uid")
     df["fold"] = df.actor.map(outer_folds(df.reset_index()))
 
     runs, budget = {}, []
     for a in ARMS:
         for f in folds:
-            run = args.runs / f"transfer_{a}_f{f}_s0"
+            run = args.runs / f"transfer_{a}{args.suffix}_f{f}_s0"
             st = json.loads((run / "state.json").read_text())
-            assert st.get("train_done") and (st["arm"], st["fold"], st["seed"]) == (a, f, 0) and st["start"] == f"stage1_s1_noI_f{f}_s0", run
+            assert st.get("train_done") and (st["arm"], st["fold"], st["seed"]) == (a + args.suffix, f, 0) and st["start"] == f"stage1_s1_noI_f{f}_s0", run
             assert st["loss_weights"] == [0.5, 0.5, 0.0] and st["n_tok"] == 4, st
             chk = pd.read_csv(run / "start_check.csv") if (run / "start_check.csv").exists() else None
             g = st.get("first_step_grad_norms", {})
@@ -108,11 +120,11 @@ def main() -> None:
 
     Q, meta = {}, {}
     for c in CONDS:
-        preds = {a: stack([args.runs / f"transfer_{a}_f{f}_s0" / "scores.jsonl" for f in folds], c) for a in ARMS}
+        preds = {a: stack([args.runs / f"transfer_{a}{args.suffix}_f{f}_s0" / "scores.jsonl" for f in folds], c) for a in ARMS}
         preds["s1_noI (start)"] = stack([args.stage1 / f"stage1_s1_noI_f{f}_s0" / "scores.jsonl" for f in folds], c)
         if c in ("AV", "V"):
             for k in ("permuted", "zero"):
-                paths = [args.runs / f"transfer_hse_tok_f{f}_s0" / "scores_checks.jsonl" for f in folds]
+                paths = [args.runs / f"transfer_hse_tok{args.suffix}_f{f}_s0" / "scores_checks.jsonl" for f in folds]
                 if all(p.exists() for p in paths):
                     preds[f"hse_tok, {k} features"] = stack(paths, c, k)
         if c == "V":
@@ -189,7 +201,7 @@ def main() -> None:
                      "partial AV (pre-specified)": "{:.4f} [{:.4f}, {:.4f}]".format(*verdict[("AV", new, ref, "partial given emotion")]),
                      "JSD V": "{:.4f} [{:.4f}, {:.4f}]".format(*verdict[("V", new, ref, "JSD")]),
                      "distributions": dist, "disagreement ranking": rank,
-                     "status": "locked protocol (3 folds)" if locked else f"pipeline check only (folds {folds})"})
+                     "status": label or ("locked protocol (3 folds)" if locked else f"pipeline check only (folds {folds})")})
     tables["reading"] = pd.DataFrame(rows)
 
     rows = []
@@ -205,7 +217,7 @@ def main() -> None:
                          "within-class Spearman difference": be(lambda i: spearman(hn[sel][i], m["hp"][sel][i]) - spearman(hr[sel][i], m["hp"][sel][i]))})
     tables["by_emotion_paired"] = pd.DataFrame(rows)
 
-    status = "three folds pooled (locked protocol)" if locked else f"folds {folds} only: pipeline check, not the locked result"
+    status = label or ("three folds pooled (locked protocol)" if locked else f"folds {folds} only: pipeline check, not the locked result")
     lines = ["# Transfer pilot: HSEmotion features as extra tokens in Qwen vs continued training with uninformative tokens\n",
              f"Generated by `analysis/transfer_compare.py`. {status}. Reading rules: see the docstring (fixed before the runs). "
              "`hse_const` is continued training with extra tokens that carry no clip-specific information, not continued "

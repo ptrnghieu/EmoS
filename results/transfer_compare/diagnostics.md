@@ -35,3 +35,21 @@ not inspected; their epoch means show no comparable rise.
 Text-token embedding RMS: 0.0137. The fixed scale controlled the initial size only; with projector LR 1e-3 and
 no constraint on the output, the tokens left the scale of the embeddings in every fold. This is a candidate
 explanation for the fold 2 instability and for the large drops under permuted / zero input, not an established cause.
+
+## Limits of these observations (05/11/2026)
+
+- An epoch mean does not rule out a short spike in folds 0-1; their training logs have not been read window by window.
+- Token RMS was large in all three folds while only fold 2 degraded strongly: size may contribute; it does not explain
+  why fold 2 alone failed.
+- The drop under permuted features is not a linear measure of how much the model relies on the tokens: it shows that
+  breaking the clip-feature match hurts, by an amount that also depends on the model's state and the mismatched input.
+
+## Wording
+
+`hse_const` better than s1_noI shows that the continued-training package (new AV:V loss, extra constant tokens, one
+more epoch) helps; it does not isolate the effect of one more epoch.
+
+## Exploratory round
+
+Arms `hse_tok_rms` / `hse_const_rms` on fold 2 (kaggle/transfer_cremad.ipynb; decision rules in the docstring of
+`analysis/transfer_compare.py`, run with `--suffix _rms`). Not pooled with, and not a replacement for, the locked runs.

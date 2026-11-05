@@ -3431,6 +3431,20 @@ target: partial Spearman (given the intended emotion) of the AV entropy with A^A
 `s1_noI`. Fold 0 checks that the run works; if held-out scores are looked at and LR, tokens or epochs are then
 changed, that run is exploratory and is not pooled with the locked protocol.
 
+**Exploratory round (05/11/2026, not pooled with the locked result).** Arms `hse_tok_rms` and `hse_const_rms`,
+fold 2 only: the same as `hse_tok` / `hse_const` except that each output token u is RMS-normalised,
+t = s0 * u / sqrt(mean(u^2) + 1e-6), in float32, with s0 = the text-embedding RMS (fixed) and no learned gain, bias
+or affine afterwards. Projector LR, LoRA LR, warm-up, tokens, loss and budget unchanged; fresh optimizer; the same
+start adapter and projector initialisation. Decision after the two runs (fixed before them):
+- training still unstable -> stop the token branch for now;
+- more stable but HSE close to its control on AV JSD and partial AV -> stop; report stability fixed, no benefit shown;
+- only V improves -> keep the V-benefit statement; no further runs hoping for AV;
+- AV JSD and partial AV both favourable against the new control -> run both arms on folds 0-1 unchanged.
+Fold 2 was chosen because it failed, so a recovery there is exploratory evidence only.
+All arms log per window of 200 clips: CE per reading, LoRA / projector gradient norms before clipping, token RMS
+before and after the normalisation; the start check reports the RMS of the video, audio, text and cue tokens at the
+language model's input.
+
 **Running it** (one notebook run per arm and fold; fold 0 first)
 1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: `cremad_mm/` (output of `prep_cremad.ipynb`), the
    output of the `s1_noI` Stage 1 run of the same fold (holds `stage1_s1_noI_f<FOLD>_s0/`), and the output of
@@ -3445,6 +3459,10 @@ changed, that run is exploratory and is not pooled with the locked protocol.
 TRANSFER_CONFIG = r"""
 # ---- transfer pilot (locked) ----
 N_TOK, PROJ_HIDDEN, PROJ_LR, PROJ_INIT_SEED, PERM_SEED = 4, 1024, 1e-3, 0, 0
+# exploratory round (05/11/2026): arms *_rms RMS-normalise each output token to the text-embedding RMS (fixed, no gain)
+OUT_NORM = "rms" if ARM.endswith("_rms") else "scale"
+RMS_EPS = 1e-6
+WINDOW_CLIPS = 200               # training log: CE, gradient norms and token RMS per window of this many clips
 PLACEHOLDER = "<|quad_start|>"   # one text token for the processor, not used by the multimodal position logic
 CUE_CONDS = ("AV", "V")          # readings that get the cue; () switches the insertion off (original prompt)
 CUE = "Facial expression cues: " + PLACEHOLDER * N_TOK + "\n"
@@ -3517,28 +3535,40 @@ D_IN = Ztr.shape[1]
 
 
 def feature(row):
-    # projector input of the clip: its standardised features (hse_tok) or the zero vector (hse_const)
-    if ARM == "hse_const":
+    # projector input of the clip: its standardised features (hse_tok*) or the zero vector (hse_const*)
+    if ARM.startswith("hse_const"):
         return torch.zeros(D_IN, device=EMB_DEVICE)
     return torch.from_numpy((POOLED[row["uid"]] - F_MU) / F_SD).float().to(EMB_DEVICE)
 
 
 class Projector(torch.nn.Module):
-    def __init__(self, d_in, d_hid, n_tok, d_out):
+    # out_norm "scale": u * fixed scale (locked pilot). "rms": s0 * u / RMS(u) per token, computed in float32, with
+    # s0 = the text-embedding RMS (fixed buffer) and no learned gain, bias or affine after the normalisation.
+    def __init__(self, d_in, d_hid, n_tok, d_out, out_norm="scale"):
         super().__init__()
         self.fc1 = torch.nn.Linear(d_in, d_hid)
         self.act = torch.nn.GELU()
         self.fc2 = torch.nn.Linear(d_hid, n_tok * d_out)
         self.register_buffer("scale", torch.ones(()))
-        self.n_tok, self.d_out = n_tok, d_out
+        if out_norm == "rms":
+            self.register_buffer("s0", torch.ones(()))
+        self.n_tok, self.d_out, self.out_norm = n_tok, d_out, out_norm
+        self.stats = []  # (mean RMS of u before the normalisation / scale, RMS of the output) per training call
 
     def forward(self, x):
-        return (self.fc2(self.act(self.fc1(x))) * self.scale).view(self.n_tok, self.d_out)
+        u = self.fc2(self.act(self.fc1(x))).view(self.n_tok, self.d_out).float()
+        if self.out_norm == "rms":
+            t = self.s0 * u / torch.sqrt(u.pow(2).mean(-1, keepdim=True) + RMS_EPS)
+        else:
+            t = u * self.scale
+        if torch.is_grad_enabled():
+            self.stats.append((float(u.detach().pow(2).mean(-1).sqrt().mean()), float(t.detach().pow(2).mean().sqrt())))
+        return t
 
 
 with torch.random.fork_rng(devices=[]):  # same initialisation in both arms; leaves the global random state unchanged
     torch.manual_seed(PROJ_INIT_SEED)
-    projector = Projector(D_IN, PROJ_HIDDEN, N_TOK, hidden_size)
+    projector = Projector(D_IN, PROJ_HIDDEN, N_TOK, hidden_size, OUT_NORM)
 projector = projector.to(EMB_DEVICE, torch.float32)
 with torch.no_grad():  # fixed scale from the real training features (both arms) and the text-token embeddings
     W = embed.weight
@@ -3548,17 +3578,22 @@ with torch.no_grad():  # fixed scale from the real training features (both arms)
     sq = sum(projector.fc2(projector.act(projector.fc1(Zs[i:i + 512].to(EMB_DEVICE)))).pow(2).sum() for i in range(0, len(Zs), 512))
     rms_proj = torch.sqrt(sq / (len(Zs) * N_TOK * hidden_size))
     projector.scale.fill_(float(rms_text / rms_proj))
+    if OUT_NORM == "rms":
+        projector.s0.fill_(float(rms_text))
 proj_params = list(projector.parameters())
 init_sum = float(sum(p.detach().double().abs().sum() for p in proj_params))
 TRANSFER_IDENT = {"start": str(START_ADAPTER.parent.parent.name), "n_tok": N_TOK, "proj_hidden": PROJ_HIDDEN,
                   "proj_lr": PROJ_LR, "proj_init_seed": PROJ_INIT_SEED, "cue_conds": list(CUE_CONDS),
                   "loss_weights": [LAMBDA_AV, LAMBDA_V, LAMBDA_A]}
+if OUT_NORM == "rms":
+    TRANSFER_IDENT["out_norm"] = "rms"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 if not (OUT_DIR / "projector_init.pt").exists():
     torch.save(projector.state_dict(), OUT_DIR / "projector_init.pt")
 print(f"features {D_IN}-d for {len(POOLED)} clips | projector {sum(p.numel() for p in proj_params) / 1e6:.1f} M params | "
       f"init checksum {init_sum:.4f} (must be the same in both arms) | RMS text {float(rms_text):.5f}, "
-      f"initial projector output {float(rms_proj):.5f}, scale {float(projector.scale):.5f}")
+      f"initial projector output {float(rms_proj):.5f}, scale {float(projector.scale):.5f} | output: {OUT_NORM}"
+      + (f", s0 {float(projector.s0):.5f}" if OUT_NORM == "rms" else ""))
 """)
 
 TRANSFER_START_CHECK = code(r"""
@@ -3588,11 +3623,14 @@ for _, row in eval_df[eval_df["uid"].isin(ref.index.get_level_values(0))].head(N
             e1 = CAPTURE["emb"][0]
             INJECT["tok"] = None
         changed = (e1 != e0).any(-1).cpu()
+        kind = {"video": ids == base.config.video_token_id, "audio": ids == base.config.audio_token_id, "cue": ids == PH_ID}
+        kind["text"] = ~(kind["video"] | kind["audio"] | kind["cue"])
+        rms_kind = {f"input RMS {k}": (float(e1[m.to(e1.device)].float().pow(2).mean().sqrt()) if m.any() else np.nan) for k, m in kind.items()}
         r = ref.loc[(row["uid"], c), lcols].to_numpy(float)
         rows.append({"uid": row["uid"], "condition": c, "max |logit diff| off vs s1_noI": float(np.abs(off - r).max()),
                      "same top label": bool(off.argmax() == r.argmax()),
                      "positions changed": int(changed.sum()), "changed = placeholders": bool(torch.equal(changed, (ids == PH_ID).cpu())),
-                     "last token": processor.tokenizer.decode(ids[-3:]), "mean |logit shift| cue on": float(np.abs(on - off).mean())})
+                     "last token": processor.tokenizer.decode(ids[-3:]), "mean |logit shift| cue on": float(np.abs(on - off).mean()), **rms_kind})
 cap.remove()
 CUE_CONDS = saved_conds
 model.train()
@@ -3605,6 +3643,40 @@ assert (check["positions changed"] <= N_TOK).all() and check["changed = placehol
 """)
 
 
+TRANSFER_WINDOW = r"""
+# Training log per window of WINDOW_CLIPS clips (not running averages): mean CE per reading, gradient norms of the LoRA
+# and the projector before clipping (non-finite = a step the gradient scaler skipped), and the projector's token RMS.
+def grad_norm(ps):
+    return sum(float(p.grad.float().pow(2).sum()) for p in ps if p.grad is not None) ** 0.5  # per tensor: LoRA spans both GPUs
+
+
+def new_window():
+    return {"ce": {}, "n": 0, "g_lora": [], "g_proj": []}
+
+
+WIN = new_window()
+
+
+def log_window():
+    global WIN
+    g_l, g_p = np.array(WIN["g_lora"]), np.array(WIN["g_proj"])
+    st_ = np.array(projector.stats) if projector.stats else np.full((1, 2), np.nan)
+    fin = lambda g: g[np.isfinite(g)] if np.isfinite(g).any() else np.array([np.nan])
+    rec = {"to_clip": state["pos"], "clips": WIN["n"], "opt_step": state["opt_step"],
+           **{f"CE_{c}": v / max(1, WIN["n"]) for c, v in WIN["ce"].items()},
+           "grad_lora_mean": float(fin(g_l).mean()), "grad_lora_max": float(fin(g_l).max()),
+           "grad_proj_mean": float(fin(g_p).mean()), "grad_proj_max": float(fin(g_p).max()),
+           "nonfinite_steps": int((~np.isfinite(g_l) | ~np.isfinite(g_p)).sum()),
+           "token_rms_before_norm": float(st_[:, 0].mean()), "token_rms_out": float(st_[:, 1].mean()),
+           "lr_lora": scheduler.get_last_lr()[0]}
+    state.setdefault("windows", []).append(rec)
+    print("window " + " | ".join(f"{k} {v:.4g}" if isinstance(v, float) else f"{k} {v}" for k, v in rec.items()))
+    projector.stats.clear()
+    WIN = new_window()
+
+
+"""
+
 def transfer_cells():
     cells = [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in STAGE1]
     src = [c["source"] if isinstance(c["source"], str) else "".join(c["source"]) for c in cells]
@@ -3615,14 +3687,14 @@ def transfer_cells():
     cfg = _patched(
         cells[i_cfg],
         ('ARM = os.environ.get("ARM", "s1")            # m3 | s1 | s1_noI | s1_avlab | v_only | s3 | s3_frozenvis | s3_norank | s3_noV',
-         'ARM = os.environ.get("ARM", "hse_tok")       # hse_tok | hse_const (projector input = the zero vector)'),
+         'ARM = os.environ.get("ARM", "hse_tok")       # hse_tok | hse_const (zero input) | hse_tok_rms | hse_const_rms (exploratory)'),
         ('LAMBDA_V = float(os.environ.get("LAMBDA_V", 0.1 if S3 else 0.25))\nif ARM == "v_only":  # the V task alone, weight 1\n'
          '    LAMBDA_V = 1.0\nLAMBDA_A = float(os.environ.get("LAMBDA_A", 0.25))',
          'LAMBDA_AV, LAMBDA_V, LAMBDA_A = 0.5, 0.5, 0.0  # per clip: 1/2 CE_AV + 1/2 CE_V; A not in the loss'),
         ('LAMBDA_I = 0.0 if ARM in ("m3", "s1_noI", "s1_avlab", "v_only") or S3 else float(os.environ.get("LAMBDA_I", 0.1))',
          'LAMBDA_I = 0.0'),
         ('assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "v_only", "s3", "s3_frozenvis", "s3_norank", "s3_noV")',
-         'assert ARM in ("hse_tok", "hse_const")'),
+         'assert ARM in ("hse_tok", "hse_const", "hse_tok_rms", "hse_const_rms")'),
         ('assert PHASE in ("outer", "inner") and 0 <= FOLD < N_OUTER and VIEW in ("A0", "A1")',
          'assert PHASE == "outer" and 0 <= FOLD < N_OUTER and VIEW == "A0"'),
         ('TRAIN_CONDS = ("AV",) if ARM in ("m3", "s3_noV") else ("V",) if ARM == "v_only" else ("AV", "V") if S3 else ("AV", "V", "A")',
@@ -3662,16 +3734,26 @@ def transfer_cells():
          '                     "proj fc1.bias": gn([projector.fc1.bias]), "proj fc2": gn(list(projector.fc2.parameters()))}\n'
          '                print("first-step gradient norms:", {k: f"{v:.3e}" for k, v in g.items()})\n'
          '                assert g["LoRA"] > 0 and g["proj fc2"] > 0 and g["proj fc1.bias"] > 0, g\n'
-         '                assert (g["proj fc1.weight"] == 0) == (ARM == "hse_const"), g\n'
+         '                assert (g["proj fc1.weight"] == 0) == ARM.startswith("hse_const"), g\n'
          '                state["first_step_grad_norms"] = g\n'),
         ('torch.nn.utils.clip_grad_norm_(lora_params + list(heads.parameters()) + list(amb_head.parameters()) + merger_params, 1.0)',
-         'torch.nn.utils.clip_grad_norm_(lora_params + list(heads.parameters()) + list(amb_head.parameters()) + merger_params + proj_params, 1.0)'))
+         'WIN["g_lora"].append(grad_norm(lora_params))  # before clipping (after unscaling)\n'
+         '            WIN["g_proj"].append(grad_norm(proj_params))\n'
+         '            torch.nn.utils.clip_grad_norm_(lora_params + list(heads.parameters()) + list(amb_head.parameters()) + merger_params + proj_params, 1.0)'),
+        ('def train():\n    model.train()\n', TRANSFER_WINDOW + 'def train():\n    model.train()\n'),
+        ('                        state["loss_sum"][c] = state["loss_sum"].get(c, 0.0) + v\n                    state["loss_n"] += 1\n',
+         '                        state["loss_sum"][c] = state["loss_sum"].get(c, 0.0) + v\n'
+         '                        WIN["ce"][c] = WIN["ce"].get(c, 0.0) + v\n'
+         '                    state["loss_n"] += 1\n                    WIN["n"] += 1\n'),
+        ('            state["opt_step"] += 1\n',
+         '            state["opt_step"] += 1\n'
+         '            if state["pos"] % WINDOW_CLIPS == 0 or state["pos"] == len(order):\n                log_window()\n'))
     checks = code(r"""
 # hse_tok only: the trained model read with (a) the features permuted between held-out clips (fixed-seed cyclic
 # permutation: every clip gets another clip's real features; no labels used) and (b) the zero input. AV and V.
 CHECKS = OUT_DIR / "scores_checks.jsonl"
 n_chk = 0
-if finished and ARM == "hse_tok":
+if finished and ARM.startswith("hse_tok"):
     model.eval()
     order = np.random.default_rng(PERM_SEED).permutation(len(eval_df))
     donor = {eval_df["uid"].iloc[order[i]]: eval_df["uid"].iloc[order[(i + 1) % len(order)]] for i in range(len(order))}
