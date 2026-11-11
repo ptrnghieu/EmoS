@@ -1,0 +1,13 @@
+comparison,intended emotion,clips,JSD difference,within-class Spearman difference
+R1_linear minus R0_linear,Anger,1271,"0.042 [0.025, 0.060]","-0.243 [-0.319, -0.168]"
+R1_linear minus R0_linear,Disgust,1270,"-0.009 [-0.021, 0.006]","-0.036 [-0.116, 0.043]"
+R1_linear minus R0_linear,Fear,1271,"-0.011 [-0.027, 0.005]","0.034 [-0.072, 0.145]"
+R1_linear minus R0_linear,Happy,1271,"0.020 [0.003, 0.037]","-0.017 [-0.078, 0.044]"
+R1_linear minus R0_linear,Neutral,1086,"-0.023 [-0.039, -0.006]","0.096 [0.019, 0.171]"
+R1_linear minus R0_linear,Sad,1269,"-0.001 [-0.014, 0.013]","-0.048 [-0.153, 0.045]"
+R3_linear minus R2_linear,Anger,1271,"0.044 [0.027, 0.061]","-0.199 [-0.260, -0.133]"
+R3_linear minus R2_linear,Disgust,1270,"0.024 [0.012, 0.036]","-0.029 [-0.108, 0.045]"
+R3_linear minus R2_linear,Fear,1271,"0.049 [0.037, 0.061]","-0.301 [-0.376, -0.226]"
+R3_linear minus R2_linear,Happy,1271,"0.036 [0.023, 0.052]","0.001 [-0.064, 0.066]"
+R3_linear minus R2_linear,Neutral,1086,"0.037 [0.024, 0.048]","-0.088 [-0.160, -0.021]"
+R3_linear minus R2_linear,Sad,1269,"0.046 [0.036, 0.056]","-0.163 [-0.237, -0.090]"

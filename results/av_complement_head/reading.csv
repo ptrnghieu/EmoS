@@ -1,0 +1,5 @@
+comparison,role,JSD AV,JSD status,partial AV,partial status,reading
+R1_linear minus R0_linear,main,"0.0038 [-0.0026, 0.0112]",CI contains 0,"-0.0495 [-0.0877, -0.0087]",clearly worse,"worse on at least one metric, better on none"
+R1_mlp minus R0_mlp,MLP sensitivity,"0.0691 [0.0621, 0.0767]",clearly worse,"-0.2489 [-0.2886, -0.2105]",clearly worse,"worse on at least one metric, better on none"
+R3_linear minus R2_linear,secondary,"0.0394 [0.0342, 0.0452]",clearly worse,"-0.1438 [-0.1792, -0.1083]",clearly worse,"worse on at least one metric, better on none"
+R3_mlp minus R2_mlp,MLP sensitivity,"0.0429 [0.0381, 0.0484]",clearly worse,"-0.1639 [-0.1926, -0.1347]",clearly worse,"worse on at least one metric, better on none"
