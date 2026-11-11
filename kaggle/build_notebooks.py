@@ -3846,8 +3846,12 @@ st = json.loads((START_ADAPTER.parent.parent / "state.json").read_text())
 assert (st["arm"], st["phase"], st["fold"], st["seed"], st["train_done"]) == (START_ARM, "outer", FOLD, 0, True), st
 TEACHER = os.environ.get("TEACHER")
 if TEACHER is None:
-    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + f"distill_teacher/teacher_v_f{FOLD}.csv"))]
-    assert hits or ARM == "cont", f"No distill_teacher/teacher_v_f{FOLD}.csv under /kaggle/input: attach the teacher files."
+    # anywhere under /kaggle/input (in a distill_teacher/ folder or at the root of the dataset)
+    hits = sorted({h for k in range(8) for h in glob.glob("/kaggle/input/" + "*/" * k + f"teacher_v_f{FOLD}.csv")})
+    if not hits:
+        print("\n".join(sorted(glob.glob("/kaggle/input/*/*/*") + glob.glob("/kaggle/input/*/*/*/*"))[:80]))
+    assert hits or ARM == "cont", f"No teacher_v_f{FOLD}.csv under /kaggle/input (folders listed above): attach the teacher dataset."
+    assert len(hits) <= 1, f"several teacher files for fold {FOLD}: {hits}"
     TEACHER = hits[0] if hits else None
 print("start adapter:", START_ADAPTER, "| teacher:", TEACHER)
 """
