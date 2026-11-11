@@ -1,0 +1,13 @@
+{
+ "labels": [
+  "Anger",
+  "Disgust",
+  "Fear",
+  "Happy",
+  "Neutral",
+  "Sad"
+ ],
+ "n_cf": 5,
+ "features": "HSEmotion mean+SD (A2 crops)",
+ "target": "video-only votes"
+}
