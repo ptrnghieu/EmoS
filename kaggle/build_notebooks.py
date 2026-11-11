@@ -3795,6 +3795,147 @@ if finished and ARM.startswith("hse_tok"):
     return out
 
 
+# ---- V distillation pilot: HSE-only teacher distributions mixed into the V target, continued from s1_noI -------
+
+DISTILL_HEAD = md(r"""
+# V distillation pilot on CREMA-D: an HSE-only teacher mixed into the video-only target (Kaggle, 2× T4)
+
+**Question.** Can the specialist's better reading of the video-only votes be moved into Qwen itself, so that HSEmotion
+is not needed at inference, while the audio-visual reading is preserved? (Design locked 11/11/2026.)
+
+**Arms** (`ARM`), identical except for the target of the V reading:
+- `cont`: continued training on the human votes, per clip `1/2 CE(p_AV, q_AV) + 1/2 CE(p_V, q_V)`.
+- `distill`: the same with the V target replaced by `p~_V = 2/3 p_V + 1/3 q_T` (alpha = 1/3, temperature 1), where
+  `q_T` is the frozen HSE-only teacher's distribution for that clip, cross-fitted within this fold's training actors
+  (`analysis/distill_teacher.py`): the teacher that predicts a clip never saw its actor. The AV target is never the
+  teacher. Both arms keep the AV and V task weights equal (1/2 each); only the V target differs.
+
+**Locked settings** (as the transfer pilot): start from the `s1_noI` adapter of the same outer fold; one extra epoch,
+last checkpoint, seed 0, the clip order of Stage 1 seed 0; fresh AdamW and scheduler (LoRA LR 1e-4, linear warm-up over
+3% of the steps, then linear decay; weight decay 0; gradient clipping at norm 1); 8 clips per optimizer step. No
+HSEmotion input at inference. Scored: the held-out actors under AV, V and A.
+
+**Checks printed during the run.** Before training: the start adapter reproduces the `s1_noI` scores of 6 held-out
+clips under AV and V; every training clip has a teacher distribution; the label order of the teacher file matches;
+the mixed targets sum to 1.
+
+**Reading** (fixed before the runs; `analysis/distill_compare.py`): `distill` minus `cont`, paired actor bootstrap,
+three folds pooled. Transfer: JSD V (main), partial V (needed to claim a better disagreement ranking). AV preservation
+(margins set by the project): upper 95% bound of delta JSD AV < +0.002 and lower bound of delta partial AV > -0.02.
+
+**Running it** (one notebook run per arm and fold)
+1. *Accelerator*: **GPU T4 x2**; *Internet*: **on**; *Add input*: `cremad_mm/`, the output of the `s1_noI` Stage 1 run of
+   the same fold (`stage1_s1_noI_f<FOLD>_s0/`), and the teacher files (`distill_teacher/teacher_v_f<FOLD>.csv`).
+2. Set `ARM` and `FOLD`. First `LIMIT = 10` for each arm (technical check), then the full run.
+3. **Save & Run All (Commit)**; if it stops at `TIME_BUDGET_H`, attach this notebook's own output and commit again.
+4. Results: `/kaggle/working/distill_<ARM>_f<FOLD>_s0/` with `scores.jsonl`, `state.json`, `start_check.csv`.
+""")
+
+DISTILL_CONFIG = r"""
+# ---- V distillation pilot (locked) ----
+ALPHA = 1 / 3                    # teacher share of the V target in the distill arm (temperature 1)
+START_ARM, N_START_CHECK = "s1_noI", 6
+START_ADAPTER = os.environ.get("START_ADAPTER")
+if START_ADAPTER is None:
+    name = f"stage1_{START_ARM}_f{FOLD}_s0"
+    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + f"{name}/last/adapter.pt"))]
+    assert hits, f"No {name}/last/adapter.pt under /kaggle/input: attach the output of that Stage 1 run."
+    START_ADAPTER = hits[0]
+START_ADAPTER = Path(START_ADAPTER)
+st = json.loads((START_ADAPTER.parent.parent / "state.json").read_text())
+assert (st["arm"], st["phase"], st["fold"], st["seed"], st["train_done"]) == (START_ARM, "outer", FOLD, 0, True), st
+TEACHER = os.environ.get("TEACHER")
+if TEACHER is None:
+    hits = [h for k in range(6) for h in sorted(glob.glob("/kaggle/input/" + "*/" * k + f"distill_teacher/teacher_v_f{FOLD}.csv"))]
+    assert hits or ARM == "cont", f"No distill_teacher/teacher_v_f{FOLD}.csv under /kaggle/input: attach the teacher files."
+    TEACHER = hits[0] if hits else None
+print("start adapter:", START_ADAPTER, "| teacher:", TEACHER)
+"""
+
+DISTILL_START = code(r"""
+res = set_peft_model_state_dict(model, torch.load(START_ADAPTER, map_location="cpu"))
+assert not getattr(res, "unexpected_keys", []), res.unexpected_keys
+print("loaded start adapter", START_ADAPTER)
+""")
+
+DISTILL_TEACHER = code(r"""
+# V target of each training clip: the human votes (cont) or 2/3 votes + 1/3 cross-fitted teacher (distill).
+train_df["p_Vt"] = train_df["p_V"]
+if TEACHER is not None:
+    t = pd.read_csv(TEACHER)
+    assert list(t.columns[2:]) == LABELS, (list(t.columns), LABELS)  # label order of the teacher file
+    t = t[t.role == "train"].set_index("uid")
+    missing = [u for u in train_df["uid"] if u not in t.index]
+    assert not missing, f"{len(missing)} training clips without a teacher distribution, e.g. {missing[:3]}"
+    assert not set(eval_df["uid"]) & set(t.index), "teacher train rows include held-out clips"
+    QT = {u: t.loc[u, LABELS].to_numpy(float) for u in train_df["uid"]}
+    if ARM == "distill":
+        train_df["p_Vt"] = [(1 - ALPHA) * np.asarray(p) + ALPHA * QT[u] for p, u in zip(train_df["p_V"], train_df["uid"])]
+    q = np.stack([QT[u] for u in train_df["uid"]])
+    pv = np.stack(train_df["p_V"])
+    print(f"teacher on the training clips: mean JSD to the V votes {float(np.mean([0.5 * (np.sum(a * np.log(np.clip(a, 1e-12, None) / np.clip((a + b) / 2, 1e-12, None))) + np.sum(b * np.log(np.clip(b, 1e-12, None) / np.clip((a + b) / 2, 1e-12, None)))) for a, b in zip(pv, q)])):.4f}")
+tgt = np.stack(train_df["p_Vt"])
+assert np.allclose(tgt.sum(1), 1, atol=1e-6) and (tgt >= 0).all()
+print(f"V targets: {ARM} | mean |p~_V - p_V| {float(np.abs(tgt - np.stack(train_df['p_V'])).mean()):.4f}")
+TARGET_COL = {"AV": "p_AV", "V": "p_Vt", "A": "p_A"}
+""")
+
+DISTILL_START_CHECK = code(r"""
+# Before training: the start adapter reproduces the s1_noI scores of the same held-out clips.
+ref = pd.DataFrame([json.loads(l) for l in open(START_ADAPTER.parent.parent / "scores.jsonl", encoding="utf-8") if l.strip()])
+ref = ref[ref.get("error", pd.Series(index=ref.index, dtype=object)).isna()]
+ref = ref.drop_duplicates(["uid", "condition"], keep="last").set_index(["uid", "condition"])
+lcols = [f"logit_{l}" for l in LABELS]
+rows = []
+model.eval()
+for _, row in eval_df[eval_df["uid"].isin(ref.index.get_level_values(0))].head(N_START_CHECK).iterrows():
+    for c in ("AV", "V"):
+        with torch.inference_mode():
+            out = reading(row, c)[0][label_first_ids].cpu().numpy()
+        r = ref.loc[(row["uid"], c), lcols].to_numpy(float)
+        rows.append({"uid": row["uid"], "condition": c, "max |logit diff| vs s1_noI": float(np.abs(out - r).max()),
+                     "same top label": bool(out.argmax() == r.argmax())})
+model.train()
+check = pd.DataFrame(rows)
+check.to_csv(OUT_DIR / "start_check.csv", index=False)
+print(check.to_string())
+assert len(check) and check["max |logit diff| vs s1_noI"].median() < 0.05 and check["same top label"].all(), "start adapter does not reproduce s1_noI"
+""")
+
+
+def distill_cells():
+    cells = [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in STAGE1]
+    src = [c["source"] if isinstance(c["source"], str) else "".join(c["source"]) for c in cells]
+    find = lambda s: next(k for k, x in enumerate(src) if s in x)
+    i_cfg, i_load = find('ARM = os.environ.get("ARM", "s1")'), find("class IntensityHeads")
+    i_data, i_loss, i_ckpt = find("rng = np.random.default_rng(SPLIT_SEED)"), find("def train_clip"), find("def save_checkpoint")
+    cfg = _patched(
+        cells[i_cfg],
+        ('ARM = os.environ.get("ARM", "s1")            # m3 | s1 | s1_noI | s1_avlab | v_only | s3 | s3_frozenvis | s3_norank | s3_noV',
+         'ARM = os.environ.get("ARM", "cont")          # cont (human votes) | distill (V target mixed with the teacher)'),
+        ('LAMBDA_V = float(os.environ.get("LAMBDA_V", 0.1 if S3 else 0.25))\nif ARM == "v_only":  # the V task alone, weight 1\n'
+         '    LAMBDA_V = 1.0\nLAMBDA_A = float(os.environ.get("LAMBDA_A", 0.25))',
+         'LAMBDA_AV, LAMBDA_V, LAMBDA_A = 0.5, 0.5, 0.0  # per clip: 1/2 CE_AV + 1/2 CE_V (both arms); A not in the loss'),
+        ('LAMBDA_I = 0.0 if ARM in ("m3", "s1_noI", "s1_avlab", "v_only") or S3 else float(os.environ.get("LAMBDA_I", 0.1))', 'LAMBDA_I = 0.0'),
+        ('assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "v_only", "s3", "s3_frozenvis", "s3_norank", "s3_noV")', 'assert ARM in ("cont", "distill")'),
+        ('assert PHASE in ("outer", "inner") and 0 <= FOLD < N_OUTER and VIEW in ("A0", "A1")', 'assert PHASE == "outer" and 0 <= FOLD < N_OUTER and VIEW == "A0"'),
+        ('TRAIN_CONDS = ("AV",) if ARM in ("m3", "s3_noV") else ("V",) if ARM == "v_only" else ("AV", "V") if S3 else ("AV", "V", "A")',
+         'TRAIN_CONDS = ("AV", "V")'),
+        ('    RUN_NAME = f"stage1_{ARM}_f{FOLD}_s{SEED}" + (f"_inner_v{LAMBDA_V:g}_a{LAMBDA_A:g}" if PHASE == "inner" else "")',
+         '    RUN_NAME = f"distill_{ARM}_f{FOLD}_s{SEED}"'),
+        ('print("run:", RUN_NAME, "| view:"', DISTILL_CONFIG + 'assert SCORE_CONDS == ("AV", "V", "A") and not STAGE3\nprint("run:", RUN_NAME, "| view:"'))
+    loss = _patched(
+        cells[i_loss],
+        ('WEIGHT = {"AV": 1.0, "V": LAMBDA_V, "A": LAMBDA_A}', 'WEIGHT = {"AV": LAMBDA_AV, "V": LAMBDA_V, "A": LAMBDA_A}'),
+        ('target = torch.tensor(row[f"p_{c}"], dtype=torch.float32, device=z.device)',
+         'target = torch.tensor(np.asarray(row[TARGET_COL[c]], dtype=float), dtype=torch.float32, device=z.device)'))
+    ckpt = _patched(cells[i_ckpt], ('if STAGE3:\n    IDENT.update(view=VIEW', 'IDENT.update(start=START_ADAPTER.parent.parent.name, alpha=ALPHA if ARM == "distill" else 0.0,\n'
+                                                                            '             loss_weights=[LAMBDA_AV, LAMBDA_V, LAMBDA_A])\nif STAGE3:\n    IDENT.update(view=VIEW'))
+    return [DISTILL_HEAD] + cells[1:i_cfg] + [cfg] + cells[i_cfg + 1:i_load + 1] + [md("## Start adapter"), DISTILL_START] \
+        + cells[i_load + 1:i_data + 1] + [md("## V targets (teacher)"), DISTILL_TEACHER] + cells[i_data + 1:i_loss] + [loss] \
+        + [md("## Check before training"), DISTILL_START_CHECK] + cells[i_loss + 1:i_ckpt] + [ckpt] + cells[i_ckpt + 1:]
+
+
 # ---- Dedicated visual baseline: HSEmotion frame features on the A2 face crops (CPU) ------------------------
 
 HSEMOTION = [
@@ -4314,5 +4455,6 @@ if __name__ == "__main__":
     write(HERE / "prep_cremad_views.ipynb", PREP_VIEWS)
     write(HERE / "stage3_cremad.ipynb", stage3_cells())
     write(HERE / "transfer_cremad.ipynb", transfer_cells())
+    write(HERE / "distill_cremad.ipynb", distill_cells())
     write(HERE / "probe_visual.ipynb", [_cremad_prompt_cell() if c == "PROMPT_PLACEHOLDER" else c for c in PROBE_VISUAL])
     write(HERE / "hsemotion_features.ipynb", HSEMOTION)
