@@ -53,3 +53,24 @@ more epoch) helps; it does not isolate the effect of one more epoch.
 
 Arms `hse_tok_rms` / `hse_const_rms` on fold 2 (kaggle/transfer_cremad.ipynb; decision rules in the docstring of
 `analysis/transfer_compare.py`, run with `--suffix _rms`). Not pooled with, and not a replacement for, the locked runs.
+
+## Correction (11/11/2026): token size relative to video and audio tokens
+
+The RMS round's start check measured the inputs of the language model: video tokens RMS 0.87, audio tokens 0.62,
+text tokens 0.0165, text-embedding RMS 0.0137. The locked runs' trained tokens (RMS 1.2-1.4) were therefore about
+100x the text embeddings but only about 1.5-2x the video and audio tokens. "Far outside the embedding distribution"
+holds against text tokens only; against the multimodal tokens they were large but of the same order.
+
+## Exploratory round result (fold 2, results/transfer_compare_rms/)
+
+Training: epoch-mean CE AV / V 0.982 / 1.220 (hse_tok_rms) and 0.972 / 1.212 (hse_const_rms), against 1.214 / 1.385
+for the failed locked hse_tok fold 2. Both RMS arms still had gradient spikes and 1-4 skipped steps between optimizer
+steps 25 and 100 (just after warm-up), the control too, and recovered within about 100 steps. Projector output before
+the normalisation grew from 0.5 to about 20 in hse_tok_rms.
+
+hse_tok_rms minus hse_const_rms: JSD AV +0.0017 [0.0010, 0.0024]; partial AV -0.006 [-0.017, 0.004];
+JSD V +0.0002 [-0.0011, 0.0015]. Permuted features: JSD +0.002 (AV), +0.004 (V); zero input: no clear change.
+
+Pre-specified decision: training more stable, HSE close to its control on AV JSD and partial AV (AV JSD slightly
+worse) -> stop extending the token branch; record that the stability problem was fixed in this fold but no benefit was
+shown. Fold 2 was chosen because it failed, so this is exploratory evidence only.
