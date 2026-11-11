@@ -1,0 +1,3 @@
+comparison,role,JSD,JSD status,partial,partial status,reading
+R1 minus R0,main,"-0.0012 [-0.0022, -0.0002]",clearly lower (better),"0.0025 [-0.0086, 0.0137]",CI contains 0,HSE adds benefit for the fit of the AV distribution in this protocol
+R3 minus R2,secondary,"-0.0017 [-0.0029, -0.0003]",clearly lower (better),"0.0056 [-0.0093, 0.0192]",CI contains 0,HSE adds benefit for the fit of the AV distribution in this protocol

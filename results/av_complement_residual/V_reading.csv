@@ -1,0 +1,2 @@
+comparison,role,JSD,JSD status,partial,partial status,reading
+V1 minus V0,positive control,"-0.0110 [-0.0151, -0.0066]",clearly lower (better),"0.0353 [0.0097, 0.0595]",clearly higher (better),the V benefit is reproduced by this recipe (JSD)
