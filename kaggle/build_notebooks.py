@@ -3805,6 +3805,9 @@ is not needed at inference, while the audio-visual reading is preserved? (Design
 
 **Arms** (`ARM`), identical except for the target of the V reading:
 - `cont`: continued training on the human votes, per clip `1/2 CE(p_AV, q_AV) + 1/2 CE(p_V, q_V)`.
+- `distill_perm` (control added 12/11/2026): as `distill`, with the teacher vectors permuted between training clips of
+  the same intended emotion and cross-fitting part (`analysis/distill_teacher_perm.py`, file `teacher_v_perm_f<k>.csv`):
+  same set of teacher distributions, no match between teacher and clip.
 - `distill`: the same with the V target replaced by `p~_V = 2/3 p_V + 1/3 q_T` (alpha = 1/3, temperature 1), where
   `q_T` is the frozen HSE-only teacher's distribution for that clip, cross-fitted within this fold's training actors
   (`analysis/distill_teacher.py`): the teacher that predicts a clip never saw its actor. The AV target is never the
@@ -3847,10 +3850,11 @@ assert (st["arm"], st["phase"], st["fold"], st["seed"], st["train_done"]) == (ST
 TEACHER = os.environ.get("TEACHER")
 if TEACHER is None:
     # anywhere under /kaggle/input (in a distill_teacher/ folder or at the root of the dataset)
-    hits = sorted({h for k in range(8) for h in glob.glob("/kaggle/input/" + "*/" * k + f"teacher_v_f{FOLD}.csv")})
+    TEACHER_FILE = f"teacher_v_perm_f{FOLD}.csv" if ARM == "distill_perm" else f"teacher_v_f{FOLD}.csv"
+    hits = sorted({h for k in range(8) for h in glob.glob("/kaggle/input/" + "*/" * k + TEACHER_FILE)})
     if not hits:
         print("\n".join(sorted(glob.glob("/kaggle/input/*/*/*") + glob.glob("/kaggle/input/*/*/*/*"))[:80]))
-    assert hits or ARM == "cont", f"No teacher_v_f{FOLD}.csv under /kaggle/input (folders listed above): attach the teacher dataset."
+    assert hits or ARM == "cont", f"No {TEACHER_FILE} under /kaggle/input (folders listed above): attach the teacher dataset."
     assert len(hits) <= 1, f"several teacher files for fold {FOLD}: {hits}"
     TEACHER = hits[0] if hits else None
 print("start adapter:", START_ADAPTER, "| teacher:", TEACHER)
@@ -3873,7 +3877,8 @@ if TEACHER is not None:
     assert not missing, f"{len(missing)} training clips without a teacher distribution, e.g. {missing[:3]}"
     assert not set(eval_df["uid"]) & set(t.index), "teacher train rows include held-out clips"
     QT = {u: t.loc[u, LABELS].to_numpy(float) for u in train_df["uid"]}
-    if ARM == "distill":
+    if ARM in ("distill", "distill_perm"):
+        assert ("perm" in Path(TEACHER).name) == (ARM == "distill_perm"), TEACHER
         train_df["p_Vt"] = [(1 - ALPHA) * np.asarray(p) + ALPHA * QT[u] for p, u in zip(train_df["p_V"], train_df["uid"])]
     q = np.stack([QT[u] for u in train_df["uid"]])
     pv = np.stack(train_df["p_V"])
@@ -3916,12 +3921,12 @@ def distill_cells():
     cfg = _patched(
         cells[i_cfg],
         ('ARM = os.environ.get("ARM", "s1")            # m3 | s1 | s1_noI | s1_avlab | v_only | s3 | s3_frozenvis | s3_norank | s3_noV',
-         'ARM = os.environ.get("ARM", "cont")          # cont (human votes) | distill (V target mixed with the teacher)'),
+         'ARM = os.environ.get("ARM", "cont")          # cont (human votes) | distill (V target mixed with the teacher) | distill_perm'),
         ('LAMBDA_V = float(os.environ.get("LAMBDA_V", 0.1 if S3 else 0.25))\nif ARM == "v_only":  # the V task alone, weight 1\n'
          '    LAMBDA_V = 1.0\nLAMBDA_A = float(os.environ.get("LAMBDA_A", 0.25))',
          'LAMBDA_AV, LAMBDA_V, LAMBDA_A = 0.5, 0.5, 0.0  # per clip: 1/2 CE_AV + 1/2 CE_V (both arms); A not in the loss'),
         ('LAMBDA_I = 0.0 if ARM in ("m3", "s1_noI", "s1_avlab", "v_only") or S3 else float(os.environ.get("LAMBDA_I", 0.1))', 'LAMBDA_I = 0.0'),
-        ('assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "v_only", "s3", "s3_frozenvis", "s3_norank", "s3_noV")', 'assert ARM in ("cont", "distill")'),
+        ('assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "v_only", "s3", "s3_frozenvis", "s3_norank", "s3_noV")', 'assert ARM in ("cont", "distill", "distill_perm")'),
         ('assert PHASE in ("outer", "inner") and 0 <= FOLD < N_OUTER and VIEW in ("A0", "A1")', 'assert PHASE == "outer" and 0 <= FOLD < N_OUTER and VIEW == "A0"'),
         ('TRAIN_CONDS = ("AV",) if ARM in ("m3", "s3_noV") else ("V",) if ARM == "v_only" else ("AV", "V") if S3 else ("AV", "V", "A")',
          'TRAIN_CONDS = ("AV", "V")'),
@@ -3933,7 +3938,7 @@ def distill_cells():
         ('WEIGHT = {"AV": 1.0, "V": LAMBDA_V, "A": LAMBDA_A}', 'WEIGHT = {"AV": LAMBDA_AV, "V": LAMBDA_V, "A": LAMBDA_A}'),
         ('target = torch.tensor(row[f"p_{c}"], dtype=torch.float32, device=z.device)',
          'target = torch.tensor(np.asarray(row[TARGET_COL[c]], dtype=float), dtype=torch.float32, device=z.device)'))
-    ckpt = _patched(cells[i_ckpt], ('if STAGE3:\n    IDENT.update(view=VIEW', 'IDENT.update(start=START_ADAPTER.parent.parent.name, alpha=ALPHA if ARM == "distill" else 0.0,\n'
+    ckpt = _patched(cells[i_ckpt], ('if STAGE3:\n    IDENT.update(view=VIEW', 'IDENT.update(start=START_ADAPTER.parent.parent.name, alpha=ALPHA if ARM != "cont" else 0.0,\n'
                                                                             '             loss_weights=[LAMBDA_AV, LAMBDA_V, LAMBDA_A])\nif STAGE3:\n    IDENT.update(view=VIEW'))
     return [DISTILL_HEAD] + cells[1:i_cfg] + [cfg] + cells[i_cfg + 1:i_load + 1] + [md("## Start adapter"), DISTILL_START] \
         + cells[i_load + 1:i_data + 1] + [md("## V targets (teacher)"), DISTILL_TEACHER] + cells[i_data + 1:i_loss] + [loss] \

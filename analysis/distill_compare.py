@@ -73,7 +73,7 @@ def main() -> None:
         for f in folds:
             st = json.loads((args.runs / f"distill_{a}_f{f}_s0" / "state.json").read_text())
             assert st.get("train_done") and (st["arm"], st["fold"], st["seed"]) == (a, f, 0) and st["start"] == f"stage1_s1_noI_f{f}_s0", st
-            assert st["loss_weights"] == [0.5, 0.5, 0.0] and abs(st["alpha"] - (1 / 3 if a == "distill" else 0.0)) < 1e-9, st
+            assert st["loss_weights"] == [0.5, 0.5, 0.0] and abs(st["alpha"] - (0.0 if a == "cont" else 1 / 3)) < 1e-9, st
             runs.append({"arm": a, "fold": f, "optimizer steps": st["opt_step"], "OOM": st["oom"],
                          "train CE AV / V": " / ".join(f"{st['history'][-1].get(f'train_CE_{c}', np.nan):.3f}" for c in ("AV", "V")),
                          "GPU hours logged": round(sum(h.get("session_hours", 0) for h in st["history"]), 1)})

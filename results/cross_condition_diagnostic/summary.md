@@ -71,6 +71,8 @@ cross-entropy, is about 1 for s1_noI in every condition and leaves the video-onl
 (`7_temperature_scaling.csv`). Together with experiment B (a learned 6 → 6 linear map of s1_noI's video-only logits
 did not improve entropy ranking), a global or per-class probability-allocation error is unlikely to be the main cause.
 
+*Amended 12/11/2026.* On s1_noI, a temperature chosen by cross-entropy is close to 1 and does not improve the video-only JSD noticeably. In a later exploration after continued training (`results/distill_calibration/`), a temperature chosen by JSD improved the video-only JSD of both continued-training arms and removed the JSD difference observed between them before calibration. Calibration can therefore not be ruled out as a source of improvement. The two analyses differ in checkpoint as well as in the selection criterion, so the difference is not attributed to the criterion alone.
+
 **Joint training gave the video-only task little weight.** In s1_noI the V loss weight is 0.1 and the A weight 0.5
 (chosen on the inner split for the AV criterion). The audio-only reading improved strongly over m3 (JSD 0.116 → 0.087);
 the video-only reading hardly moved (0.148 → 0.142). This is why the next step is the controlled `v_only` baseline.

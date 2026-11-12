@@ -1,0 +1,4 @@
+outer fold,training clips,groups (emotion x part),clips keeping their own vector,teacher entropy mean (unchanged),"mixed target entropy, true teacher","mixed target entropy, permuted teacher",mean |entropy change| per clip,sha256
+0,4898,30,0,0.6049,0.5371,0.574,0.1165,21c03a6798dd9d86
+1,4990,30,0,0.5891,0.5294,0.567,0.1125,d402543a199dab53
+2,4988,30,0,0.5907,0.5271,0.5675,0.1134,33e2092c5e763980

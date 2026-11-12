@@ -7,6 +7,14 @@ chosen on the other two head folds (by mean JSD to the V votes, over a grid in [
 applied to the third. Out-of-sample predictions are pooled; paired bootstrap over actors. The locked pilot table is
 unchanged; this is exploratory. Main comparison: distill calibrated minus cont calibrated.
 
+Teacher-clip match control (12/11/2026): when the runs of arm distill_perm (teacher vectors permuted between clips of
+the same emotion and cross-fitting part) exist, it is calibrated the same way. Read on partial V (calibrated):
+    distill better than distill_perm      -> evidence that the teacher-clip match contributes
+    similar, both better than cont         -> role of clip-level information not established
+    wide intervals                         -> the two explanations are not separated
+The permuted mixed targets are flatter on average (results/distill_teacher/perm_report.csv); calibration absorbs a
+global difference, not a per-clip one.
+
 Reading (fixed before running):
     JSD gap gone or reversed, partial still higher -> grounds to prefer a transfer that controls the softness separately
     JSD still worse after calibration              -> global confidence does not explain enough; look at the
@@ -37,6 +45,7 @@ from visual_probe_analysis import N_OUTER, norm_entropy, outer_folds, partial_sp
 
 GRID = np.unique(np.concatenate([np.round(np.exp(np.linspace(np.log(0.5), np.log(2.0), 61)), 4), [1.0]]))
 ARMS = ("cont", "distill")
+PERM = "distill_perm"  # teacher-clip match control (added 12/11/2026), included when its three runs exist
 
 
 def read_v(path: Path) -> pd.DataFrame:
@@ -54,16 +63,17 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     df = clip_table().set_index("uid")
     df["fold"] = df.actor.map(outer_folds(df.reset_index()))
+    arms = ARMS + ((PERM,) if all((args.runs / f"distill_{PERM}_f{k}_s0" / "scores.jsonl").exists() for k in range(N_OUTER)) else ())
     rows, temps = [], []
     for k in range(N_OUTER):
-        z = {a: read_v(args.runs / f"distill_{a}_f{k}_s0" / "scores.jsonl") for a in ARMS}
-        uids = [u for u in z["cont"].index if u in z["distill"].index and u in df.index and df.loc[u, "fold"] == k and df.loc[u, "v_n"] > 0]
+        z = {a: read_v(args.runs / f"distill_{a}_f{k}_s0" / "scores.jsonl") for a in arms}
+        uids = [u for u in z["cont"].index if all(u in z[a].index for a in arms) and u in df.index and df.loc[u, "fold"] == k and df.loc[u, "v_n"] > 0]
         d = df.loc[uids]
         P = counts(d, "v")
         P = P / P.sum(1, keepdims=True)
         hf = d.actor.map(head_folds(d.groupby("actor")["Sex"].first(), k)).to_numpy()
-        out = {f"{a} (T=1)": softmax(z[a].loc[uids].to_numpy(float)) for a in ARMS}
-        for a in ARMS:
+        out = {f"{a} (T=1)": softmax(z[a].loc[uids].to_numpy(float)) for a in arms}
+        for a in arms:
             Z = z[a].loc[uids].to_numpy(float)
             cal = np.zeros_like(P)
             for j in range(N_HEAD):
@@ -79,7 +89,7 @@ def main() -> None:
     R = pd.DataFrame(rows)
     Pv = np.stack(R.p)
     hp, emo, act, fo = norm_entropy(Pv), R.emotion.to_numpy(), R.actor.to_numpy(), R.fold.to_numpy()
-    names = [f"{a} ({c})" for c in ("T=1", "calibrated") for a in ARMS]
+    names = [f"{a} ({c})" for c in ("T=1", "calibrated") for a in arms]
     Q = {n: np.stack(R[n]) for n in names}
     boot = Bootstrap(act, N_BOOT)
 
@@ -92,6 +102,9 @@ def main() -> None:
                               **{f"JSD fold {k}": round(float(jsd(Q[n], Pv)[fo == k].mean()), 4) for k in range(N_OUTER)}} for n in names])
     pairs = [("distill (calibrated)", "cont (calibrated)", "main"), ("distill (T=1)", "cont (T=1)", "locked pilot (recomputed)"),
              ("distill (calibrated)", "distill (T=1)", "calibration effect"), ("cont (calibrated)", "cont (T=1)", "calibration effect")]
+    if PERM in arms:
+        pairs += [(f"distill (calibrated)", f"{PERM} (calibrated)", "teacher-clip match"), (f"{PERM} (calibrated)", "cont (calibrated)", "permuted teacher vs cont"),
+                  ("distill (T=1)", f"{PERM} (T=1)", "teacher-clip match, uncalibrated")]
     prow, st = [], {}
     for a, b, role in pairs:
         ma, mb = met(Q[a]), met(Q[b])
@@ -117,6 +130,18 @@ def main() -> None:
                              "JSD status": "clearly lower" if hj < 0 else "clearly higher" if lj > 0 else "CI contains 0",
                              "partial V": "{:.4f} [{:.4f}, {:.4f}]".format(*st[("distill (calibrated)", "cont (calibrated)", "partial V")]),
                              "partial status": "clearly higher" if lp > 0 else "clearly lower" if hpp < 0 else "CI contains 0", "reading": text}])
+    if PERM in arms:  # reading of the teacher-clip match control (fixed 12/11/2026, before its runs)
+        _, l1, h1 = st[("distill (calibrated)", f"{PERM} (calibrated)", "partial V")]
+        _, l2, h2 = st[(f"{PERM} (calibrated)", "cont (calibrated)", "partial V")]
+        if l1 > 0:
+            t2 = "true teacher better than permuted on partial V: evidence that the clip match contributes"
+        elif l2 > 0 and h1 >= 0 and l1 <= 0:
+            t2 = "true and permuted teachers similar, both above cont: role of clip-level information not established; study the target/regularisation effect"
+        else:
+            t2 = "intervals too wide to separate the two explanations"
+        reading = pd.concat([reading, pd.DataFrame([{"JSD V (distill cal - cont cal)": "", "reading": "teacher-clip match control: " + t2,
+                                                     "partial V": "distill - perm: {:.4f} [{:.4f}, {:.4f}]; perm - cont: {:.4f} [{:.4f}, {:.4f}]".format(
+                                                         *st[("distill (calibrated)", f"{PERM} (calibrated)", "partial V")], *st[(f"{PERM} (calibrated)", "cont (calibrated)", "partial V")])}])])
     T = pd.DataFrame(temps)
     tsum = T.groupby("arm").agg(temperature_mean=("temperature", "mean"), temperature_min=("temperature", "min"),
                                 temperature_max=("temperature", "max"), fits=("temperature", "size")).reset_index().round(3)
