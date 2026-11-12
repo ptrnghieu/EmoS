@@ -1,0 +1,7 @@
+arm,fold,optimizer steps,OOM,train CE AV / V,GPU hours logged
+cont,0,613,0,0.965 / 1.210,7.5
+cont,1,624,0,0.967 / 1.206,7.9
+cont,2,624,0,0.967 / 1.207,8.3
+distill,0,613,0,0.964 / 1.251,8.4
+distill,1,624,0,0.965 / 1.231,8.1
+distill,2,624,0,0.965 / 1.236,7.8

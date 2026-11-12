@@ -1,0 +1,2 @@
+JSD V (distill - cont),partial V,V,JSD AV,AV JSD margin (+0.002),partial AV,AV partial margin (-0.02),overall,status
+"0.0020 [0.0015, 0.0024]","0.0092 [0.0045, 0.0140]",JSD not clearly lower; partial clearly higher (ranking),"-0.0004 [-0.0005, -0.0002]",meets the margin,"0.0033 [0.0013, 0.0052]",meets the margin,V not better: this configuration did not transfer the teacher's benefit,three folds pooled (locked protocol)
