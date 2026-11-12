@@ -1,0 +1,7 @@
+intended emotion,clips,JSD difference (distill cal - cont cal)
+Anger,1271,"-0.003 [-0.004, -0.001]"
+Disgust,1270,"-0.001 [-0.002, 0.000]"
+Fear,1271,"0.001 [-0.000, 0.002]"
+Happy,1271,"0.002 [0.001, 0.002]"
+Neutral,1086,"0.001 [-0.000, 0.002]"
+Sad,1269,"0.002 [0.000, 0.003]"

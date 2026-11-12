@@ -1,0 +1,5 @@
+comparison,role,JSD V,partial V,"Spearman(H(q), A^V)",mean H(q),JSD fold 0,JSD fold 1,JSD fold 2
+distill (calibrated) minus cont (calibrated),main,"0.000 [-0.000, 0.001]","0.006 [0.002, 0.011]","-0.001 [-0.005, 0.003]","-0.001 [-0.003, 0.002]",0.0,0.0003,-0.0001
+distill (T=1) minus cont (T=1),locked pilot (recomputed),"0.002 [0.001, 0.002]","0.009 [0.005, 0.014]","0.000 [-0.004, 0.004]","0.025 [0.024, 0.027]",0.0022,0.0021,0.0015
+distill (calibrated) minus distill (T=1),calibration effect,"-0.005 [-0.006, -0.003]","-0.007 [-0.013, 0.000]","0.001 [-0.005, 0.006]","-0.118 [-0.124, -0.113]",-0.0039,-0.006,-0.0044
+cont (calibrated) minus cont (T=1),calibration effect,"-0.003 [-0.004, -0.002]","-0.004 [-0.010, 0.003]","0.002 [-0.004, 0.007]","-0.092 [-0.098, -0.087]",-0.0018,-0.0042,-0.0027

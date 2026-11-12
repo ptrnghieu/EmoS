@@ -1,0 +1,3 @@
+arm,temperature_mean,temperature_min,temperature_max,fits
+cont,0.795,0.74,0.871,9
+distill,0.749,0.707,0.812,9
