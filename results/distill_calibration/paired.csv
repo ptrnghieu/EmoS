@@ -3,3 +3,6 @@ distill (calibrated) minus cont (calibrated),main,"0.000 [-0.000, 0.001]","0.006
 distill (T=1) minus cont (T=1),locked pilot (recomputed),"0.002 [0.001, 0.002]","0.009 [0.005, 0.014]","0.000 [-0.004, 0.004]","0.025 [0.024, 0.027]",0.0022,0.0021,0.0015
 distill (calibrated) minus distill (T=1),calibration effect,"-0.005 [-0.006, -0.003]","-0.007 [-0.013, 0.000]","0.001 [-0.005, 0.006]","-0.118 [-0.124, -0.113]",-0.0039,-0.006,-0.0044
 cont (calibrated) minus cont (T=1),calibration effect,"-0.003 [-0.004, -0.002]","-0.004 [-0.010, 0.003]","0.002 [-0.004, 0.007]","-0.092 [-0.098, -0.087]",-0.0018,-0.0042,-0.0027
+distill (calibrated) minus distill_perm (calibrated),teacher-clip match,"-0.002 [-0.003, -0.001]","0.031 [0.023, 0.039]","0.007 [-0.001, 0.014]","-0.003 [-0.007, 0.000]",-0.0035,-0.0018,0.0003
+distill_perm (calibrated) minus cont (calibrated),permuted teacher vs cont,"0.002 [0.001, 0.003]","-0.024 [-0.032, -0.016]","-0.008 [-0.015, -0.000]","0.003 [-0.000, 0.005]",0.0036,0.0022,-0.0004
+distill (T=1) minus distill_perm (T=1),"teacher-clip match, uncalibrated","-0.009 [-0.010, -0.008]","0.032 [0.024, 0.040]","0.010 [0.003, 0.016]","-0.064 [-0.068, -0.060]",-0.0096,-0.0095,-0.0073
