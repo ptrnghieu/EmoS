@@ -1,0 +1,4 @@
+outer fold,training clips,same-emotion pairs,valid share,valid pairs,sources disagree (share of valid),"Spearman(u_T, u_H) within emotion",queue: valid pairs per clip (mean),queue: clips without a pair
+0,4898,2003035,0.2564,513483,0.2544,0.312,11.0,0.0006
+1,4990,2078963,0.2559,532109,0.2682,0.294,11.0,0.0004
+2,4988,2077013,0.2594,538761,0.2311,0.35,11.0,0.0002

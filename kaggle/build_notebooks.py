@@ -3808,6 +3808,16 @@ is not needed at inference, while the audio-visual reading is preserved? (Design
 - `distill_perm` (control added 12/11/2026): as `distill`, with the teacher vectors permuted between training clips of
   the same intended emotion and cross-fitting part (`analysis/distill_teacher_perm.py`, file `teacher_v_perm_f<k>.csv`):
   same set of teacher distributions, no match between teacher and clip.
+- `rank_teacher` / `rank_votes` (ranking-transfer pilot, locked 13/11/2026): `cont` plus `LAMBDA_RANK * L_rank` on the
+  V reading. L_rank: pairwise logistic loss on the normalised entropy H_S of the student's own V output,
+  mean over valid pairs of softplus(-r_ij * K * (H_S(i) - H_S(j))), clip i against the clips of the same emotion among
+  the 256 most recent training clips (their entropies detached, computed by earlier versions of the student: an
+  approximation with stale references and one-sided gradients; the queue starts empty each session; the loss is
+  computed before the clip enters the queue; no valid pair -> 0). Valid pairs, shared by both arms: same emotion and
+  |u_T(i)-u_T(j)| >= 0.3 and |u_H(i)-u_H(j)| >= 0.3, with u_T, u_H the within-emotion midrank percentiles of the
+  teacher entropy and of the human V-vote entropy on the outer-train clips (`analysis/rank_pairs.py`, file
+  `rank_u_f<k>.csv`). r_ij = sign of the u_T difference (`rank_teacher`) or of the u_H difference (`rank_votes`).
+  LAMBDA_RANK = 0.1, K = 10 (fixed). AV and V targets are the human votes.
 - `distill`: the same with the V target replaced by `p~_V = 2/3 p_V + 1/3 q_T` (alpha = 1/3, temperature 1), where
   `q_T` is the frozen HSE-only teacher's distribution for that clip, cross-fitted within this fold's training actors
   (`analysis/distill_teacher.py`): the teacher that predicts a clip never saw its actor. The AV target is never the
@@ -3854,10 +3864,17 @@ if TEACHER is None:
     hits = sorted({h for k in range(8) for h in glob.glob("/kaggle/input/" + "*/" * k + TEACHER_FILE)})
     if not hits:
         print("\n".join(sorted(glob.glob("/kaggle/input/*/*/*") + glob.glob("/kaggle/input/*/*/*/*"))[:80]))
-    assert hits or ARM == "cont", f"No {TEACHER_FILE} under /kaggle/input (folders listed above): attach the teacher dataset."
+    assert hits or not ARM.startswith("distill"), f"No {TEACHER_FILE} under /kaggle/input (folders listed above): attach the teacher dataset."
     assert len(hits) <= 1, f"several teacher files for fold {FOLD}: {hits}"
     TEACHER = hits[0] if hits else None
-print("start adapter:", START_ADAPTER, "| teacher:", TEACHER)
+RANK = ARM.startswith("rank")
+LAMBDA_RANK, RANK_K, RANK_QUEUE, RANK_MIN_DU = (0.1, 10.0, 256, 0.3) if RANK else (0.0, 0.0, 0, 0.0)
+RANK_FILE = os.environ.get("RANK_FILE")
+if RANK and RANK_FILE is None:
+    hits = sorted({h for k in range(8) for h in glob.glob("/kaggle/input/" + "*/" * k + f"rank_u_f{FOLD}.csv")})
+    assert len(hits) == 1, f"need exactly one rank_u_f{FOLD}.csv under /kaggle/input (found {hits}): attach the teacher dataset."
+    RANK_FILE = hits[0]
+print("start adapter:", START_ADAPTER, "| teacher:", TEACHER, "| rank file:", RANK_FILE)
 """
 
 DISTILL_START = code(r"""
@@ -3887,6 +3904,56 @@ tgt = np.stack(train_df["p_Vt"])
 assert np.allclose(tgt.sum(1), 1, atol=1e-6) and (tgt >= 0).all()
 print(f"V targets: {ARM} | mean |p~_V - p_V| {float(np.abs(tgt - np.stack(train_df['p_V'])).mean()):.4f}")
 TARGET_COL = {"AV": "p_AV", "V": "p_Vt", "A": "p_A"}
+""")
+
+DISTILL_RANK = code(r"""
+# Ranking loss on the entropy of the student's own V output (rank_teacher / rank_votes; inactive otherwise).
+RQ = []  # (intended emotion, u_T, u_H, detached normalised entropy) of the most recent training clips, all emotions
+RANK_LOG = {"clips": 0, "pairs": 0, "no_pair": 0, "loss_sum": 0.0, "sign_disagree": 0}
+if RANK:
+    ru = pd.read_csv(RANK_FILE).set_index("uid")
+    missing = [u for u in train_df["uid"] if u not in ru.index]
+    assert not missing, f"{len(missing)} training clips without percentiles, e.g. {missing[:3]}"
+    assert (ru.loc[train_df["uid"], "intended"].to_numpy() == train_df["intended"].to_numpy()).all()
+    U = {u: (float(ru.loc[u, "u_T"]), float(ru.loc[u, "u_H"])) for u in train_df["uid"]}
+
+
+def norm_ent(z):
+    q = torch.softmax(z.float(), -1)
+    return -(q * torch.log(q.clamp_min(1e-12))).sum() / np.log(len(LABELS))
+
+
+def rank_term(z, row):
+    uT, uH = U[row["uid"]]
+    emo = row["intended"]
+    h = norm_ent(z)
+    pairs = [(q[3], np.sign((uT - q[1]) if ARM == "rank_teacher" else (uH - q[2])), np.sign(uT - q[1]) != np.sign(uH - q[2]))
+             for q in RQ if q[0] == emo and abs(uT - q[1]) >= RANK_MIN_DU and abs(uH - q[2]) >= RANK_MIN_DU]
+    RANK_LOG["clips"] += 1
+    RANK_LOG["pairs"] += len(pairs)
+    RANK_LOG["no_pair"] += not pairs
+    RANK_LOG["sign_disagree"] += sum(int(p[2]) for p in pairs)
+    if pairs:
+        hj = torch.tensor([p[0] for p in pairs], device=h.device)
+        r = torch.tensor([p[1] for p in pairs], dtype=torch.float32, device=h.device)
+        loss = torch.nn.functional.softplus(-r * RANK_K * (h - hj)).mean()
+    else:
+        loss = torch.zeros((), device=h.device)
+    RQ.append((emo, uT, uH, float(h.detach())))
+    del RQ[:-RANK_QUEUE]
+    RANK_LOG["loss_sum"] += float(loss.detach())
+    assert torch.isfinite(loss)
+    return loss
+
+
+# sign check: with r = +1 (clip i should be the more ambiguous) the loss must fall as H(i) rises
+_z = torch.tensor([2.0, 0.5, 0.1, 0.0, -0.5, -1.0], requires_grad=True)
+_h = norm_ent(_z)
+_l = torch.nn.functional.softplus(-1.0 * 10.0 * (_h - torch.tensor(0.5)))
+(_g,) = torch.autograd.grad(_l, _h)
+assert float(_g) < 0 and np.isfinite(float(_g)), float(_g)
+print("ranking loss sign check passed: dL/dH_i =", round(float(_g), 4), "| rank arm:", RANK,
+      f"| lambda {LAMBDA_RANK}, K {RANK_K}, queue {RANK_QUEUE}, min percentile gap {RANK_MIN_DU}")
 """)
 
 DISTILL_START_CHECK = code(r"""
@@ -3921,12 +3988,12 @@ def distill_cells():
     cfg = _patched(
         cells[i_cfg],
         ('ARM = os.environ.get("ARM", "s1")            # m3 | s1 | s1_noI | s1_avlab | v_only | s3 | s3_frozenvis | s3_norank | s3_noV',
-         'ARM = os.environ.get("ARM", "cont")          # cont (human votes) | distill (V target mixed with the teacher) | distill_perm'),
+         'ARM = os.environ.get("ARM", "cont")          # cont | distill | distill_perm | rank_teacher | rank_votes'),
         ('LAMBDA_V = float(os.environ.get("LAMBDA_V", 0.1 if S3 else 0.25))\nif ARM == "v_only":  # the V task alone, weight 1\n'
          '    LAMBDA_V = 1.0\nLAMBDA_A = float(os.environ.get("LAMBDA_A", 0.25))',
          'LAMBDA_AV, LAMBDA_V, LAMBDA_A = 0.5, 0.5, 0.0  # per clip: 1/2 CE_AV + 1/2 CE_V (both arms); A not in the loss'),
         ('LAMBDA_I = 0.0 if ARM in ("m3", "s1_noI", "s1_avlab", "v_only") or S3 else float(os.environ.get("LAMBDA_I", 0.1))', 'LAMBDA_I = 0.0'),
-        ('assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "v_only", "s3", "s3_frozenvis", "s3_norank", "s3_noV")', 'assert ARM in ("cont", "distill", "distill_perm")'),
+        ('assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "v_only", "s3", "s3_frozenvis", "s3_norank", "s3_noV")', 'assert ARM in ("cont", "distill", "distill_perm", "rank_teacher", "rank_votes")'),
         ('assert PHASE in ("outer", "inner") and 0 <= FOLD < N_OUTER and VIEW in ("A0", "A1")', 'assert PHASE == "outer" and 0 <= FOLD < N_OUTER and VIEW == "A0"'),
         ('TRAIN_CONDS = ("AV",) if ARM in ("m3", "s3_noV") else ("V",) if ARM == "v_only" else ("AV", "V") if S3 else ("AV", "V", "A")',
          'TRAIN_CONDS = ("AV", "V")'),
@@ -3937,12 +4004,27 @@ def distill_cells():
         cells[i_loss],
         ('WEIGHT = {"AV": 1.0, "V": LAMBDA_V, "A": LAMBDA_A}', 'WEIGHT = {"AV": LAMBDA_AV, "V": LAMBDA_V, "A": LAMBDA_A}'),
         ('target = torch.tensor(row[f"p_{c}"], dtype=torch.float32, device=z.device)',
-         'target = torch.tensor(np.asarray(row[TARGET_COL[c]], dtype=float), dtype=torch.float32, device=z.device)'))
-    ckpt = _patched(cells[i_ckpt], ('if STAGE3:\n    IDENT.update(view=VIEW', 'IDENT.update(start=START_ADAPTER.parent.parent.name, alpha=ALPHA if ARM != "cont" else 0.0,\n'
+         'target = torch.tensor(np.asarray(row[TARGET_COL[c]], dtype=float), dtype=torch.float32, device=z.device)'),
+        ('        scaler.scale(loss * scale).backward()\n        out[c] = ce.item()\n',
+         '        if RANK and c == "V":\n'
+         '            rl = rank_term(z, row)\n'
+         '            loss = loss + LAMBDA_RANK * rl.to(HEAD_DEVICE)\n'
+         '            out["rank"] = float(rl)\n'
+         '        scaler.scale(loss * scale).backward()\n        out[c] = ce.item()\n'))
+    ckpt = _patched(cells[i_ckpt], ('if STAGE3:\n    IDENT.update(view=VIEW', 'IDENT.update(start=START_ADAPTER.parent.parent.name, alpha=ALPHA if ARM.startswith("distill") else 0.0, lambda_rank=LAMBDA_RANK,\n'
                                                                             '             loss_weights=[LAMBDA_AV, LAMBDA_V, LAMBDA_A])\nif STAGE3:\n    IDENT.update(view=VIEW'))
     return [DISTILL_HEAD] + cells[1:i_cfg] + [cfg] + cells[i_cfg + 1:i_load + 1] + [md("## Start adapter"), DISTILL_START] \
-        + cells[i_load + 1:i_data + 1] + [md("## V targets (teacher)"), DISTILL_TEACHER] + cells[i_data + 1:i_loss] + [loss] \
-        + [md("## Check before training"), DISTILL_START_CHECK] + cells[i_loss + 1:i_ckpt] + [ckpt] + cells[i_ckpt + 1:]
+        + cells[i_load + 1:i_data + 1] + [md("## V targets (teacher)"), DISTILL_TEACHER, md("## Ranking loss (rank arms)"), DISTILL_RANK] \
+        + cells[i_data + 1:i_loss] + [loss] \
+        + [md("## Check before training"), DISTILL_START_CHECK] + cells[i_loss + 1:i_ckpt] + [ckpt] + cells[i_ckpt + 1:] \
+        + [code(r"""
+if RANK and RANK_LOG["clips"]:  # ranking-loss log of this session (the queue restarts empty in a resumed session)
+    n = RANK_LOG["clips"]
+    summary = {**RANK_LOG, "pairs per clip": RANK_LOG["pairs"] / n, "clips without a pair": RANK_LOG["no_pair"] / n,
+               "mean ranking loss": RANK_LOG["loss_sum"] / n, "sources disagree (share of pairs)": RANK_LOG["sign_disagree"] / max(1, RANK_LOG["pairs"])}
+    print(summary)
+    (OUT_DIR / f"rank_log_session_{int(T_START)}.json").write_text(json.dumps(summary, indent=1))
+""")]
 
 
 # ---- Dedicated visual baseline: HSEmotion frame features on the A2 face crops (CPU) ------------------------
