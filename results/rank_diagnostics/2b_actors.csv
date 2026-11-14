@@ -1,0 +1,2 @@
+actors,partial V diff (all actors),leave-one-actor-out partial V diff: min / max,actor whose removal moves partial most,JSD V diff per actor: share < 0,JSD V diff per actor: min / median / max,leave-one-actor-out JSD V diff: min / max
+91,0.0091,0.0081 / 0.0098,1024,0.582,-0.0037 / -0.0002 / 0.0059,-0.00017 / -0.00006
