@@ -1,0 +1,51 @@
+{
+ "arm": "rank_teacher",
+ "phase": "outer",
+ "fold": 1,
+ "seed": 0,
+ "lambdas": [
+  0.5,
+  0.0,
+  0.0
+ ],
+ "sizes": [
+  4990,
+  2448
+ ],
+ "start": "stage1_s1_noI_f1_s0",
+ "alpha": 0.0,
+ "lambda_rank": 0.1,
+ "loss_weights": [
+  0.5,
+  0.5,
+  0.0
+ ],
+ "epoch": 1,
+ "pos": 0,
+ "opt_step": 624,
+ "loss_sum": {},
+ "loss_n": 0,
+ "oom": 0,
+ "history": [
+  {
+   "epoch": 0,
+   "train_CE_AV": 0.9663070371288635,
+   "train_CE_rank": 0.47031272234524507,
+   "train_CE_V": 1.2045619691966591,
+   "session_hours": 7.98
+  }
+ ],
+ "train_done": true,
+ "rank": {
+  "clips": 0,
+  "pairs": 0,
+  "no_pair": 0,
+  "sentence_level": 0,
+  "delta_bins": [
+   0,
+   0,
+   0
+  ]
+ },
+ "saved_at": 1794608771.4329467
+}

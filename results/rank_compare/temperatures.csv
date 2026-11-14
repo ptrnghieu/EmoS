@@ -1,0 +1,9 @@
+condition,arm,mean,min,max
+AV,cont,0.777,0.707,0.831
+AV,distill,0.781,0.707,0.851
+AV,rank_teacher,0.779,0.707,0.851
+AV,rank_votes,0.777,0.707,0.831
+V,cont,0.795,0.74,0.871
+V,distill,0.749,0.707,0.812
+V,rank_teacher,0.785,0.724,0.871
+V,rank_votes,0.769,0.707,0.831

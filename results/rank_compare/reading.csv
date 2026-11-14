@@ -1,0 +1,13 @@
+item,value
+partial V: rank_teacher - cont,"0.0091 [0.0052, 0.0131]"
+partial V: rank_teacher - rank_votes,"0.0086 [0.0045, 0.0132]"
+partial V: rank_votes - cont,"0.0005 [-0.0034, 0.0038]"
+JSD V: rank_teacher - cont,"-0.0001 [-0.0004, 0.0003]"
+JSD V margin,meets
+JSD AV,"-0.0000 [-0.0001, 0.0001]"
+JSD AV margin,meets
+partial AV,"0.0014 [-0.0001, 0.0029]"
+partial AV margin,meets
+vs distill (JSD V; partial V),"-0.0002 [-0.0005, 0.0002]; 0.0027 [-0.0008, 0.0065]"
+overall,"rank_teacher better than cont on partial V, meeting the non-inferiority margins: the pilot improves the V ranking within the trade-off limits set; also better than rank_votes: further evidence for the teacher's ranking"
+status,three folds pooled
