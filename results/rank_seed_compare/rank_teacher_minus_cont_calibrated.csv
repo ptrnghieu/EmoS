@@ -1,0 +1,7 @@
+condition,seed,JSD (rank_teacher - cont),partial (rank_teacher - cont),partial V clearly higher,JSD V margin (+0.002),partial fold 0,partial fold 1,partial fold 2,JSD AV margin (+0.002),partial AV margin (-0.02)
+V,seed 0,"-0.000 [-0.000, 0.000]","0.009 [0.005, 0.013]",True,meets,0.0094,0.0111,0.0036,,
+V,seed 1,"-0.000 [-0.000, 0.000]","0.008 [0.004, 0.010]",True,meets,0.0103,0.0106,-0.0002,,
+V,mean of the two seeds,"-0.000 [-0.000, 0.000]","0.008 [0.005, 0.011]",True,meets,,,,,
+AV,seed 0,"-0.000 [-0.000, 0.000]","0.001 [-0.000, 0.003]",,,-0.0012,0.0031,0.0024,meets,meets
+AV,seed 1,"0.000 [-0.000, 0.000]","0.002 [0.000, 0.003]",,,0.0037,0.0013,0.001,meets,meets
+AV,mean of the two seeds,"0.000 [-0.000, 0.000]","0.002 [0.001, 0.003]",,,,,,meets,meets

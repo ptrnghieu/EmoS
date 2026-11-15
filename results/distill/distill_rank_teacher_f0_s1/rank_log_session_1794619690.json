@@ -1,0 +1,11 @@
+{
+ "clips": 4898,
+ "pairs": 52113,
+ "no_pair": 28,
+ "loss_sum": 2323.733483468648,
+ "sign_disagree": 13311,
+ "pairs per clip": 10.639648836259697,
+ "clips without a pair": 0.0057166190281747655,
+ "mean ranking loss": 0.4744249660001323,
+ "sources disagree (share of pairs)": 0.25542570951585974
+}
