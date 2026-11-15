@@ -1,0 +1,4 @@
+student,"T-structure, S-entropy: target out of reach","S-structure, T-entropy: target out of reach",clips
+cont (calibrated),2,1,7438
+cont (T=1),2,1,7438
+rank_teacher (calibrated),2,0,7438

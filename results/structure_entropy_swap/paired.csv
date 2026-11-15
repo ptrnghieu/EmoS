@@ -1,0 +1,13 @@
+student,comparison,JSD V,top label
+cont (calibrated),teacher structure at the student's entropy minus student,"-0.008 [-0.012, -0.003]","0.035 [0.019, 0.051]"
+cont (calibrated),teacher minus student structure at the teacher's entropy,"-0.012 [-0.016, -0.008]","0.035 [0.019, 0.051]"
+cont (calibrated),student structure at the teacher's entropy minus student,"0.002 [-0.000, 0.003]","0.000 [0.000, 0.000]"
+cont (calibrated),teacher minus teacher structure at the student's entropy,"-0.003 [-0.005, -0.001]","0.000 [0.000, 0.000]"
+cont (T=1),teacher structure at the student's entropy minus student,"-0.007 [-0.010, -0.003]","0.035 [0.019, 0.051]"
+cont (T=1),teacher minus student structure at the teacher's entropy,"-0.012 [-0.016, -0.008]","0.035 [0.019, 0.051]"
+cont (T=1),student structure at the teacher's entropy minus student,"-0.001 [-0.003, 0.000]","0.000 [0.000, 0.000]"
+cont (T=1),teacher minus teacher structure at the student's entropy,"-0.007 [-0.009, -0.006]","0.000 [0.000, 0.000]"
+rank_teacher (calibrated),teacher structure at the student's entropy minus student,"-0.008 [-0.012, -0.003]","0.035 [0.019, 0.050]"
+rank_teacher (calibrated),teacher minus student structure at the teacher's entropy,"-0.012 [-0.016, -0.008]","0.035 [0.019, 0.050]"
+rank_teacher (calibrated),student structure at the teacher's entropy minus student,"0.002 [-0.000, 0.003]","0.000 [0.000, 0.000]"
+rank_teacher (calibrated),teacher minus teacher structure at the student's entropy,"-0.003 [-0.004, -0.001]","0.000 [0.000, 0.000]"
