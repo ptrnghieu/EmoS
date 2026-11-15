@@ -3808,6 +3808,11 @@ is not needed at inference, while the audio-visual reading is preserved? (Design
 - `distill_perm` (control added 12/11/2026): as `distill`, with the teacher vectors permuted between training clips of
   the same intended emotion and cross-fitting part (`analysis/distill_teacher_perm.py`, file `teacher_v_perm_f<k>.csv`):
   same set of teacher distributions, no match between teacher and clip.
+- `std_kd` (logit-standardised distillation baseline, locked 15/11/2026): `cont` plus
+  `LAMBDA_KD * TAU^2 * KL(t~ || q~)` on the V reading, t~ = softmax(Z(z_T) / TAU), q~ = softmax(Z(z_S) / TAU),
+  Z(z) = (z - mean(z)) / max(std(z), 1e-6) (population std over the six label logits, gradient kept through the
+  student's mean and std, float32), z_T = log of the cross-fitted teacher probabilities of that clip (floored at 1e-8,
+  floors counted), z_S = the student's six label logits. LAMBDA_KD = 0.1, TAU = 1, no per-clip weights, V only.
 - `rank_teacher` / `rank_votes` (ranking-transfer pilot, locked 13/11/2026): `cont` plus `LAMBDA_RANK * L_rank` on the
   V reading. L_rank: pairwise logistic loss on the normalised entropy H_S of the student's own V output,
   mean over valid pairs of softplus(-r_ij * K * (H_S(i) - H_S(j))), clip i against the clips of the same emotion among
@@ -3864,10 +3869,12 @@ if TEACHER is None:
     hits = sorted({h for k in range(8) for h in glob.glob("/kaggle/input/" + "*/" * k + TEACHER_FILE)})
     if not hits:
         print("\n".join(sorted(glob.glob("/kaggle/input/*/*/*") + glob.glob("/kaggle/input/*/*/*/*"))[:80]))
-    assert hits or not ARM.startswith("distill"), f"No {TEACHER_FILE} under /kaggle/input (folders listed above): attach the teacher dataset."
+    assert hits or not (ARM.startswith("distill") or ARM == "std_kd"), f"No {TEACHER_FILE} under /kaggle/input (folders listed above): attach the teacher dataset."
     assert len(hits) <= 1, f"several teacher files for fold {FOLD}: {hits}"
     TEACHER = hits[0] if hits else None
 RANK = ARM.startswith("rank")
+STD_KD = ARM == "std_kd"
+LAMBDA_KD, KD_TAU, KD_EPS, KD_FLOOR = (0.1, 1.0, 1e-6, 1e-8) if STD_KD else (0.0, 1.0, 1e-6, 1e-8)
 LAMBDA_RANK, RANK_K, RANK_QUEUE, RANK_MIN_DU = (0.1, 10.0, 256, 0.3) if RANK else (0.0, 0.0, 0, 0.0)
 RANK_FILE = os.environ.get("RANK_FILE")
 if RANK and RANK_FILE is None:
@@ -3956,6 +3963,69 @@ print("ranking loss sign check passed: dL/dH_i =", round(float(_g), 4), "| rank 
       f"| lambda {LAMBDA_RANK}, K {RANK_K}, queue {RANK_QUEUE}, min percentile gap {RANK_MIN_DU}")
 """)
 
+DISTILL_STDKD = code(r"""
+# Logit-standardised distillation on the V reading (std_kd; inactive otherwise).
+KD_LOG = {"sigma_at_eps_student": 0, "sigma_at_eps_teacher": 0, "teacher_floored": 0}
+
+
+def zstd(z):
+    z = z.float()
+    sd = z.std(unbiased=False)
+    if float(sd) <= KD_EPS:
+        return None, (z - z.mean()) / KD_EPS
+    return sd, (z - z.mean()) / sd
+
+
+ZT = {}
+if STD_KD:
+    assert TEACHER is not None and "perm" not in Path(TEACHER).name
+    for u in train_df["uid"]:
+        q = np.asarray(QT[u], dtype=float)
+        KD_LOG["teacher_floored"] += int((q < KD_FLOOR).sum())
+        ZT[u] = np.log(np.maximum(q, KD_FLOOR))
+    print("teacher probabilities floored at 1e-8:", KD_LOG["teacher_floored"], "of", 6 * len(ZT))
+
+
+def std_kd_term(z, row):
+    zt = torch.tensor(ZT[row["uid"]], dtype=torch.float32, device=z.device)
+    sdt, nt = zstd(zt)
+    sds, ns = zstd(z)
+    KD_LOG["sigma_at_eps_teacher"] += sdt is None
+    KD_LOG["sigma_at_eps_student"] += sds is None
+    t = torch.softmax(nt / KD_TAU, -1)
+    logq = torch.log_softmax(ns / KD_TAU, -1)
+    kd = KD_TAU ** 2 * (t * (torch.log(t.clamp_min(1e-12)) - logq)).sum()
+    assert torch.isfinite(kd)
+    return kd
+
+
+# invariance check: Z(a z + b) = Z(z) for a > 0, and the loss is unchanged
+_z = torch.tensor([1.3, -0.2, 0.4, 2.1, -1.0, 0.0])
+assert torch.allclose(zstd(3.7 * _z + 2.5)[1], zstd(_z)[1], atol=1e-5)
+print("standardisation invariance check passed | std_kd arm:", STD_KD, f"| lambda {LAMBDA_KD}, tau {KD_TAU}")
+""")
+
+DISTILL_STDKD_GRAD = code(r"""
+# std_kd only: CE_V and KD separately, and the norm of their gradients on the LoRA weights, on 4 fixed training clips.
+if STD_KD:
+    gn = lambda gs: sum(float(g.float().pow(2).sum()) for g in gs if g is not None) ** 0.5
+    rows = []
+    for _, row in train_df.head(4).iterrows():
+        inputs = prepare(build_messages(row, "V"))
+        z = model(**inputs, use_cache=False).logits[0, -1].float()[label_first_ids]
+        target = torch.tensor(np.asarray(row["p_V"], dtype=float), dtype=torch.float32, device=z.device)
+        ce = -(target * torch.log_softmax(z, -1)).sum()
+        kd = std_kd_term(z, row)
+        g_ce = torch.autograd.grad(LAMBDA_V * ce, lora_params, retain_graph=True, allow_unused=True)
+        g_kd = torch.autograd.grad(LAMBDA_KD * kd, lora_params, allow_unused=True)
+        rows.append({"uid": row["uid"], "CE_V": float(ce), "KD": float(kd), "|grad| 1/2 CE_V": gn(g_ce), "|grad| lambda KD": gn(g_kd)})
+    model.zero_grad(set_to_none=True)
+    chk = pd.DataFrame(rows)
+    print(chk.to_string())
+    assert np.isfinite(chk[["|grad| 1/2 CE_V", "|grad| lambda KD"]].to_numpy()).all() and (chk["|grad| lambda KD"] > 0).all()
+    chk.to_csv(OUT_DIR / "std_kd_grad_check.csv", index=False)
+""")
+
 DISTILL_START_CHECK = code(r"""
 # Before training: the start adapter reproduces the s1_noI scores of the same held-out clips.
 ref = pd.DataFrame([json.loads(l) for l in open(START_ADAPTER.parent.parent / "scores.jsonl", encoding="utf-8") if l.strip()])
@@ -3988,12 +4058,12 @@ def distill_cells():
     cfg = _patched(
         cells[i_cfg],
         ('ARM = os.environ.get("ARM", "s1")            # m3 | s1 | s1_noI | s1_avlab | v_only | s3 | s3_frozenvis | s3_norank | s3_noV',
-         'ARM = os.environ.get("ARM", "cont")          # cont | distill | distill_perm | rank_teacher | rank_votes'),
+         'ARM = os.environ.get("ARM", "cont")          # cont | distill | distill_perm | rank_teacher | rank_votes | std_kd'),
         ('LAMBDA_V = float(os.environ.get("LAMBDA_V", 0.1 if S3 else 0.25))\nif ARM == "v_only":  # the V task alone, weight 1\n'
          '    LAMBDA_V = 1.0\nLAMBDA_A = float(os.environ.get("LAMBDA_A", 0.25))',
          'LAMBDA_AV, LAMBDA_V, LAMBDA_A = 0.5, 0.5, 0.0  # per clip: 1/2 CE_AV + 1/2 CE_V (both arms); A not in the loss'),
         ('LAMBDA_I = 0.0 if ARM in ("m3", "s1_noI", "s1_avlab", "v_only") or S3 else float(os.environ.get("LAMBDA_I", 0.1))', 'LAMBDA_I = 0.0'),
-        ('assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "v_only", "s3", "s3_frozenvis", "s3_norank", "s3_noV")', 'assert ARM in ("cont", "distill", "distill_perm", "rank_teacher", "rank_votes")'),
+        ('assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "v_only", "s3", "s3_frozenvis", "s3_norank", "s3_noV")', 'assert ARM in ("cont", "distill", "distill_perm", "rank_teacher", "rank_votes", "std_kd")'),
         ('assert PHASE in ("outer", "inner") and 0 <= FOLD < N_OUTER and VIEW in ("A0", "A1")', 'assert PHASE == "outer" and 0 <= FOLD < N_OUTER and VIEW == "A0"'),
         ('TRAIN_CONDS = ("AV",) if ARM in ("m3", "s3_noV") else ("V",) if ARM == "v_only" else ("AV", "V") if S3 else ("AV", "V", "A")',
          'TRAIN_CONDS = ("AV", "V")'),
@@ -4010,14 +4080,22 @@ def distill_cells():
          '            rl = rank_term(z, row)\n'
          '            loss = loss + LAMBDA_RANK * rl.to(HEAD_DEVICE)\n'
          '            out["rank"] = float(rl)\n'
+         '        if STD_KD and c == "V":\n'
+         '            kd = std_kd_term(z, row)\n'
+         '            loss = loss + LAMBDA_KD * kd.to(HEAD_DEVICE)\n'
+         '            out["kd"] = float(kd)\n'
          '        scaler.scale(loss * scale).backward()\n        out[c] = ce.item()\n'))
-    ckpt = _patched(cells[i_ckpt], ('if STAGE3:\n    IDENT.update(view=VIEW', 'IDENT.update(start=START_ADAPTER.parent.parent.name, alpha=ALPHA if ARM.startswith("distill") else 0.0, lambda_rank=LAMBDA_RANK,\n'
+    ckpt = _patched(cells[i_ckpt], ('if STAGE3:\n    IDENT.update(view=VIEW', 'IDENT.update(start=START_ADAPTER.parent.parent.name, alpha=ALPHA if ARM.startswith("distill") else 0.0, lambda_rank=LAMBDA_RANK, lambda_kd=LAMBDA_KD, kd_tau=KD_TAU,\n'
                                                                             '             loss_weights=[LAMBDA_AV, LAMBDA_V, LAMBDA_A])\nif STAGE3:\n    IDENT.update(view=VIEW'))
     return [DISTILL_HEAD] + cells[1:i_cfg] + [cfg] + cells[i_cfg + 1:i_load + 1] + [md("## Start adapter"), DISTILL_START] \
-        + cells[i_load + 1:i_data + 1] + [md("## V targets (teacher)"), DISTILL_TEACHER, md("## Ranking loss (rank arms)"), DISTILL_RANK] \
+        + cells[i_load + 1:i_data + 1] + [md("## V targets (teacher)"), DISTILL_TEACHER, md("## Ranking loss (rank arms)"), DISTILL_RANK,
+                                            md("## Logit-standardised distillation (std_kd)"), DISTILL_STDKD] \
         + cells[i_data + 1:i_loss] + [loss] \
-        + [md("## Check before training"), DISTILL_START_CHECK] + cells[i_loss + 1:i_ckpt] + [ckpt] + cells[i_ckpt + 1:] \
+        + [md("## Check before training"), DISTILL_START_CHECK, DISTILL_STDKD_GRAD] + cells[i_loss + 1:i_ckpt] + [ckpt] + cells[i_ckpt + 1:] \
         + [code(r"""
+if STD_KD:
+    print("std_kd log:", KD_LOG)
+    (OUT_DIR / f"std_kd_log_session_{int(T_START)}.json").write_text(json.dumps(KD_LOG, indent=1))
 if RANK and RANK_LOG["clips"]:  # ranking-loss log of this session (the queue restarts empty in a resumed session)
     n = RANK_LOG["clips"]
     summary = {**RANK_LOG, "pairs per clip": RANK_LOG["pairs"] / n, "clips without a pair": RANK_LOG["no_pair"] / n,

@@ -1,0 +1,3 @@
+group,clips,share,JSD: T-structure at S-entropy minus S,student JSD in group,teacher top among raters' top,student top among raters' top
+same top label (teacher = student),5266,0.708,"-0.004 [-0.006, -0.002]",0.1047,0.821,0.821
+different top label,2172,0.292,"-0.017 [-0.029, -0.003]",0.1875,0.45,0.329
