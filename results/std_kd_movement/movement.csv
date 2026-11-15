@@ -1,0 +1,6 @@
+comparison,mean JSD between the two models,top label changed,standardised KL to teacher: first,second,difference (first - second),JSD to votes: share better / worse (>0.005),mean change in better / worse clips,"mean change, all clips"
+std_kd s0 vs cont s0,0.00013,0.0137,0.1543,0.1588,"-0.004 [-0.005, -0.004]",0.086 / 0.070,-0.0085 / 0.0081,"-0.000 [-0.000, 0.000]"
+rank_teacher s0 vs cont s0,0.00029,0.0215,0.1566,0.1588,"-0.002 [-0.003, -0.001]",0.150 / 0.162,-0.0097 / 0.0098,"0.000 [-0.000, 0.001]"
+distill s0 vs cont s0,0.00122,0.0332,0.1547,0.1588,"-0.004 [-0.006, -0.002]",0.183 / 0.336,-0.0141 / 0.0126,"0.002 [0.001, 0.002]"
+cont s1 vs cont s0,0.0027,0.069,0.1571,0.1588,"-0.002 [-0.005, 0.001]",0.324 / 0.350,-0.0210 / 0.0190,"-0.000 [-0.001, 0.001]"
+rank_teacher s1 vs cont s1,0.00025,0.0204,0.1555,0.1571,"-0.002 [-0.002, -0.001]",0.151 / 0.133,-0.0093 / 0.0094,"-0.000 [-0.000, 0.000]"
