@@ -1,0 +1,13 @@
+item,value
+JSD V: std_kd - cont (main),"-0.0002 [-0.0004, 0.0000]"
+partial V: std_kd - cont,"-0.0000 [-0.0019, 0.0020]"
+JSD V: std_kd - rank_teacher,"-0.0001 [-0.0004, 0.0002]"
+partial V: std_kd - rank_teacher,"-0.0091 [-0.0126, -0.0058]"
+JSD V: std_kd - distill,"-0.0003 [-0.0007, 0.0001]"
+partial V: std_kd - distill,"-0.0064 [-0.0101, -0.0025]"
+JSD AV,"-0.0001 [-0.0002, 0.0000]"
+JSD AV margin,meets
+partial AV,"0.0002 [-0.0007, 0.0010]"
+partial AV margin,meets
+overall,JSD V not clearly lower than cont: this configuration did not show a transfer of the structural advantage
+status,three folds pooled
