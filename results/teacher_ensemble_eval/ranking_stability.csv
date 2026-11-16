@@ -1,0 +1,4 @@
+source,pairs,mean within-emotion Spearman
+single teacher (heads of different partitions),75,0.8993
+"three-teacher ensemble, H(mean), disjoint combinations",10,0.9557
+"three-teacher ensemble, mean H, disjoint combinations",10,0.9556

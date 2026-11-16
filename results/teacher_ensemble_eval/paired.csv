@@ -1,0 +1,4 @@
+comparison,JSD V,top label,partial H(mean),mean H,swap minus student,partial mean H,partial
+three-teacher ensemble (mean over 125) minus single teacher (mean over 15),"-0.002 [-0.003, -0.002]","0.008 [0.007, 0.010]","0.011 [0.009, 0.012]","0.008 [0.008, 0.009]","-0.003 [-0.003, -0.002]",,
+15-teacher ensemble minus three-teacher ensemble (mean over 125),"-0.001 [-0.001, -0.001]","0.002 [-0.000, 0.005]","0.005 [0.005, 0.006]","0.004 [0.004, 0.004]","-0.001 [-0.002, -0.001]","0.006 [0.005, 0.007]",
+three-teacher ensemble: partial mean H minus partial H(mean),,,,,,,"0.001 [-0.000, 0.002]"
