@@ -3813,6 +3813,9 @@ is not needed at inference, while the audio-visual reading is preserved? (Design
   Z(z) = (z - mean(z)) / max(std(z), 1e-6) (population std over the six label logits, gradient kept through the
   student's mean and std, float32), z_T = log of the cross-fitted teacher probabilities of that clip (floored at 1e-8,
   floors counted), z_S = the student's six label logits. LAMBDA_KD = 0.1, TAU = 1, no per-clip weights, V only.
+- `std_kd_ens3` (locked 16/11/2026): `std_kd` with one change, the teacher: per training clip the mean of the
+  probabilities of its three out-of-sample teachers from three actor partitions (`analysis/distill_teacher_repeated.py`,
+  `teacher_v_ens3_f<k>.csv`), then log and standardisation. Provenance checked against `members_f<k>.csv`.
 - `rank_teacher` / `rank_votes` (ranking-transfer pilot, locked 13/11/2026): `cont` plus `LAMBDA_RANK * L_rank` on the
   V reading. L_rank: pairwise logistic loss on the normalised entropy H_S of the student's own V output,
   mean over valid pairs of softplus(-r_ij * K * (H_S(i) - H_S(j))), clip i against the clips of the same emotion among
@@ -3865,15 +3868,20 @@ assert (st["arm"], st["phase"], st["fold"], st["seed"], st["train_done"]) == (ST
 TEACHER = os.environ.get("TEACHER")
 if TEACHER is None:
     # anywhere under /kaggle/input (in a distill_teacher/ folder or at the root of the dataset)
-    TEACHER_FILE = f"teacher_v_perm_f{FOLD}.csv" if ARM == "distill_perm" else f"teacher_v_f{FOLD}.csv"
+    TEACHER_FILE = {"distill_perm": f"teacher_v_perm_f{FOLD}.csv", "std_kd_ens3": f"teacher_v_ens3_f{FOLD}.csv"}.get(ARM, f"teacher_v_f{FOLD}.csv")
     hits = sorted({h for k in range(8) for h in glob.glob("/kaggle/input/" + "*/" * k + TEACHER_FILE)})
     if not hits:
         print("\n".join(sorted(glob.glob("/kaggle/input/*/*/*") + glob.glob("/kaggle/input/*/*/*/*"))[:80]))
-    assert hits or not (ARM.startswith("distill") or ARM == "std_kd"), f"No {TEACHER_FILE} under /kaggle/input (folders listed above): attach the teacher dataset."
+    assert hits or not (ARM.startswith("distill") or ARM.startswith("std_kd")), f"No {TEACHER_FILE} under /kaggle/input (folders listed above): attach the teacher dataset."
     assert len(hits) <= 1, f"several teacher files for fold {FOLD}: {hits}"
     TEACHER = hits[0] if hits else None
 RANK = ARM.startswith("rank")
-STD_KD = ARM == "std_kd"
+STD_KD = ARM in ("std_kd", "std_kd_ens3")
+MEMBERS = None
+if ARM == "std_kd_ens3":  # provenance of the three-teacher targets
+    hits = sorted({h for k in range(8) for h in glob.glob("/kaggle/input/" + "*/" * k + f"members_f{FOLD}.csv")})
+    MEMBERS = os.environ.get("MEMBERS", hits[0] if len(hits) == 1 else None)
+    assert MEMBERS is not None, f"need exactly one members_f{FOLD}.csv under /kaggle/input (found {hits}): attach the teacher dataset."
 LAMBDA_KD, KD_TAU, KD_EPS, KD_FLOOR = (0.1, 1.0, 1e-6, 1e-8) if STD_KD else (0.0, 1.0, 1e-6, 1e-8)
 LAMBDA_RANK, RANK_K, RANK_QUEUE, RANK_MIN_DU = (0.1, 10.0, 256, 0.3) if RANK else (0.0, 0.0, 0, 0.0)
 RANK_FILE = os.environ.get("RANK_FILE")
@@ -3979,6 +3987,15 @@ def zstd(z):
 ZT = {}
 if STD_KD:
     assert TEACHER is not None and "perm" not in Path(TEACHER).name
+    assert ("ens3" in Path(TEACHER).name) == (ARM == "std_kd_ens3"), TEACHER
+    if ARM == "std_kd_ens3":  # each training target = mean of exactly three out-of-sample predictions, one per partition
+        mem = pd.read_csv(MEMBERS).query("role == 'train'")
+        cnt = mem.groupby("uid")["partition"].agg(["nunique", "size"])
+        assert ((cnt["nunique"] == 3) & (cnt["size"] == 3)).loc[train_df["uid"]].all(), "a training clip lacks one prediction per partition"
+        mean3 = mem.groupby("uid")[LABELS].mean().loc[train_df["uid"]].to_numpy()
+        tgt = np.stack([QT[u] for u in train_df["uid"]])
+        assert np.abs(mean3 - tgt).max() < 1e-6 and np.allclose(tgt.sum(1), 1, atol=1e-5), float(np.abs(mean3 - tgt).max())
+        print(f"three-teacher targets checked: {len(train_df)} clips, max |mean of members - target| {np.abs(mean3 - tgt).max():.1e}")
     for u in train_df["uid"]:
         q = np.asarray(QT[u], dtype=float)
         KD_LOG["teacher_floored"] += int((q < KD_FLOOR).sum())
@@ -4058,12 +4075,12 @@ def distill_cells():
     cfg = _patched(
         cells[i_cfg],
         ('ARM = os.environ.get("ARM", "s1")            # m3 | s1 | s1_noI | s1_avlab | v_only | s3 | s3_frozenvis | s3_norank | s3_noV',
-         'ARM = os.environ.get("ARM", "cont")          # cont | distill | distill_perm | rank_teacher | rank_votes | std_kd'),
+         'ARM = os.environ.get("ARM", "cont")          # cont | distill | distill_perm | rank_teacher | rank_votes | std_kd | std_kd_ens3'),
         ('LAMBDA_V = float(os.environ.get("LAMBDA_V", 0.1 if S3 else 0.25))\nif ARM == "v_only":  # the V task alone, weight 1\n'
          '    LAMBDA_V = 1.0\nLAMBDA_A = float(os.environ.get("LAMBDA_A", 0.25))',
          'LAMBDA_AV, LAMBDA_V, LAMBDA_A = 0.5, 0.5, 0.0  # per clip: 1/2 CE_AV + 1/2 CE_V (both arms); A not in the loss'),
         ('LAMBDA_I = 0.0 if ARM in ("m3", "s1_noI", "s1_avlab", "v_only") or S3 else float(os.environ.get("LAMBDA_I", 0.1))', 'LAMBDA_I = 0.0'),
-        ('assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "v_only", "s3", "s3_frozenvis", "s3_norank", "s3_noV")', 'assert ARM in ("cont", "distill", "distill_perm", "rank_teacher", "rank_votes", "std_kd")'),
+        ('assert ARM in ("m3", "s1", "s1_noI", "s1_avlab", "v_only", "s3", "s3_frozenvis", "s3_norank", "s3_noV")', 'assert ARM in ("cont", "distill", "distill_perm", "rank_teacher", "rank_votes", "std_kd", "std_kd_ens3")'),
         ('assert PHASE in ("outer", "inner") and 0 <= FOLD < N_OUTER and VIEW in ("A0", "A1")', 'assert PHASE == "outer" and 0 <= FOLD < N_OUTER and VIEW == "A0"'),
         ('TRAIN_CONDS = ("AV",) if ARM in ("m3", "s3_noV") else ("V",) if ARM == "v_only" else ("AV", "V") if S3 else ("AV", "V", "A")',
          'TRAIN_CONDS = ("AV", "V")'),
@@ -4085,7 +4102,7 @@ def distill_cells():
          '            loss = loss + LAMBDA_KD * kd.to(HEAD_DEVICE)\n'
          '            out["kd"] = float(kd)\n'
          '        scaler.scale(loss * scale).backward()\n        out[c] = ce.item()\n'))
-    ckpt = _patched(cells[i_ckpt], ('if STAGE3:\n    IDENT.update(view=VIEW', 'IDENT.update(start=START_ADAPTER.parent.parent.name, alpha=ALPHA if ARM.startswith("distill") else 0.0, lambda_rank=LAMBDA_RANK, lambda_kd=LAMBDA_KD, kd_tau=KD_TAU,\n'
+    ckpt = _patched(cells[i_ckpt], ('if STAGE3:\n    IDENT.update(view=VIEW', 'IDENT.update(start=START_ADAPTER.parent.parent.name, alpha=ALPHA if ARM.startswith("distill") else 0.0, lambda_rank=LAMBDA_RANK, lambda_kd=LAMBDA_KD, kd_tau=KD_TAU,\n             teacher_file=Path(TEACHER).name if TEACHER else None,\n'
                                                                             '             loss_weights=[LAMBDA_AV, LAMBDA_V, LAMBDA_A])\nif STAGE3:\n    IDENT.update(view=VIEW'))
     return [DISTILL_HEAD] + cells[1:i_cfg] + [cfg] + cells[i_cfg + 1:i_load + 1] + [md("## Start adapter"), DISTILL_START] \
         + cells[i_load + 1:i_data + 1] + [md("## V targets (teacher)"), DISTILL_TEACHER, md("## Ranking loss (rank arms)"), DISTILL_RANK,
