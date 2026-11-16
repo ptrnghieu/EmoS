@@ -13,6 +13,8 @@ Outputs per fold: teacher_v_f<k>.csv (uid, role = train / heldout, the six proba
 quality report of the cross-fitted teacher on the training clips (JSD, partial Spearman, entropy) and of the
 ensemble on the held-out clips.
 
+With --members, each of the five teachers' held-out predictions are written as well (teacher_v_members_f<k>.csv).
+
 Usage (from the repository root; needs torch):
     python analysis/distill_teacher.py --out results/distill_teacher
 """
@@ -51,6 +53,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--features", type=Path, default=Path("results/hsemotion_features/features.npz"))
     parser.add_argument("--out", type=Path, default=Path("results/distill_teacher"))
+    parser.add_argument("--members", action="store_true", help="also write each cross-fitted teacher's held-out predictions (teacher_v_members_f<k>.csv)")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     df = clip_table().set_index("uid")
@@ -91,6 +94,9 @@ def main() -> None:
             choices.append({"outer fold": k, "part": j, "head": kind, "weight decay": wd, "epoch": ep, "inner JSD": round(score, 4),
                             "fit actors": len(fa), "predicted clips": int(pred.sum())})
         assert not np.isnan(q_train[tr_all]).any()
+        if args.members:  # added 16/11/2026: the five teachers separately, held-out actors of fold k
+            pd.concat([pd.DataFrame({"uid": np.array(uids)[ho], "member": j, **dict(zip(LABELS, q.T))}) for j, q in enumerate(q_ho)]).to_csv(
+                args.out / f"teacher_v_members_f{k}.csv", index=False, float_format="%.8f")
         q_ho = np.mean(q_ho, 0)
         rows = [{"uid": u, "role": "train", **dict(zip(LABELS, q))} for u, q in zip(np.array(uids)[tr_all], q_train[tr_all])]
         rows += [{"uid": u, "role": "heldout", **dict(zip(LABELS, q))} for u, q in zip(np.array(uids)[ho], q_ho)]

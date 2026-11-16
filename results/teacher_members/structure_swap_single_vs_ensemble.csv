@@ -1,0 +1,8 @@
+teacher,JSD: teacher structure at the student's entropy minus student,target out of reach
+single teacher 0,"-0.004 [-0.008, 0.000]",1
+single teacher 1,"-0.004 [-0.009, 0.002]",0
+single teacher 2,"-0.002 [-0.007, 0.003]",1
+single teacher 3,"-0.005 [-0.009, 0.000]",2
+single teacher 4,"-0.006 [-0.011, -0.002]",0
+ensemble,"-0.008 [-0.012, -0.003]",2
+mean over the five single-teacher swaps,"-0.004 [-0.008, 0.000]",
