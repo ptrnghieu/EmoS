@@ -1,4 +1,27 @@
-"""Step 1 (locked 16/11/2026, before the extraction run): is the information about the alternative interpretations
+"""Step 1 (criteria revised and locked 16/11/2026, before the extraction run and before any result of it).
+
+Decision criterion: can the representation tell apart clips of the SAME intended emotion that make viewers disagree
+more or less, and does this ability fall after the merger MLP? The KL decomposition below is kept as a description of
+where the probes err; it is no longer the decision criterion (a probe can improve mainly by recognising the emotion
+category better, and Delta_alt / I do not isolate an ambiguity-specific mechanism).
+
+Primary quantity: within-emotion ranking of disagreement, rho_within = mean over the six intended emotions of
+Spearman(H(q_i), H(p_i)) on the held-out clips (normalised entropies; q from the six-class probe, p the V votes).
+Delta_within = rho_within(after) - rho_within(before) (negative = worse after the merger MLP), paired bootstrap over
+actors. Supplementary: partial Spearman given the intended emotion, per-emotion Spearman, JSD, KL and its
+decomposition. Human labels are used only to train the probe's target and to score, never as probe inputs.
+    Delta_within clearly < 0 in the main variant, same sign in both sensitivity variants
+        -> the within-emotion disagreement ranking is less decodable after the merger MLP under these readouts:
+           premise for an ambiguity-specific intervention at this position
+    only KL / E_ref / JSD worse, Delta_within not clearly < 0
+        -> not enough to develop an ambiguity method at the merger
+    the sign of Delta_within changes across variants
+        -> the merger effect is not separated from aggregation and readout
+    no degradation of the within-emotion ranking
+        -> stop the merger direction
+Entropy alone does not tell the alternative interpretations apart; the per-emotion KL parts are reported for that.
+
+Original question (kept for the description): is the information about the alternative interpretations
 less decodable after the merger MLP than before it, relative to the information about the reference class?
 
 Input: the base-model run of kaggle/probe_visual.ipynb with MERGER_IO = 1 (vprobe_base_A0_mio): per clip, the mean and
@@ -12,17 +35,15 @@ only for scoring. Splits: the three Stage 1 outer folds by actor; the L2 weight 
 inner actor split (15%) of the training part, then refit on the whole training part. Preprocessing fitted on the
 part being fitted. Main: mean -> StandardScaler -> PCA 256 -> StandardScaler. Sensitivity (fixed before running):
 mean + SD with PCA 256; mean without PCA (StandardScaler only).
-Scoring: KL(p || q) per clip decomposed into E_ref and E_alt (analysis/kl_decomposition.py; ties averaged).
-Delta_alt = mean E_alt(post) - mean E_alt(pre), Delta_ref likewise (positive = worse after the merger MLP),
-I = Delta_alt - Delta_ref (a difference of absolute error increases, not a share of lost information). Paired
-bootstrap over actors, the same resamples for both parts and I.
-
-Reading: Delta_alt > 0 and I > 0, stable across the sensitivity analyses -> supports the selective-degradation
-hypothesis for this measurement; both parts worse with no clear difference -> general degradation, selectivity not
-shown; result changes with pooling / PCA -> the merger effect is not separated from aggregation and readout;
-Delta_alt not > 0 -> no premise for a preservation loss at this position. Allowed statement: "the decodability of the
-judgment structure from the aggregated representation falls after the merger MLP, under the readouts tried" (the
-mean of a nonlinear map is not the map of the mean; the effect of ln_q is not part of this comparison).
+Diagnostics (not decision criteria): KL(p || q) per clip decomposed into E_ref and E_alt (analysis/kl_decomposition.py;
+ties averaged); Delta_alt = mean E_alt(post) - mean E_alt(pre), Delta_ref likewise (positive = worse after the merger
+MLP), I = Delta_alt - Delta_ref (a difference of absolute error increases, not a share of lost information); JSD and
+top-label recognition are read from the same probes. Paired bootstrap over actors, the same resamples for all
+quantities. They say where a probe errs; a worse KL or E_ref alone does not support an ambiguity method.
+"Clearly < 0": 95% interval entirely below 0. A negative result (any branch other than the first) is used to stop
+the merger direction. Allowed statement if the first branch holds: "the within-emotion ranking of viewer
+disagreement is less decodable from the aggregated representation after the merger MLP, under the readouts tried"
+(the mean of a nonlinear map is not the map of the mean; the effect of ln_q is not part of this comparison).
 
 Usage (from the repository root):
     python analysis/merger_probe.py --run results/visual_probe/vprobe_base_A0_mio --out results/merger_probe
@@ -44,8 +65,8 @@ from hsemotion_head import INNER_VAL_SHARE
 from kl_decomposition import decompose
 from preprocess_cremad import LABELS, clip_table
 from rq3_analysis import Bootstrap, fmt
-from rq_analysis import markdown
-from visual_probe_analysis import N_OUTER, SPLIT_SEED, outer_folds
+from rq_analysis import markdown, spearman
+from visual_probe_analysis import N_OUTER, SPLIT_SEED, norm_entropy, outer_folds, partial_spearman
 
 LAMBDAS = [1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0]
 N_PCA = 256
@@ -133,39 +154,57 @@ def main() -> None:
                 te, tr = folds == f, folds != f
                 Q[te], lam, ok = probe(X, P, actors, tr, te, SPLIT_SEED + 600 + f)
                 sel_rows.append({"variant": vname, "position": pos, "fold": f, "lambda": lam, "converged": ok, "dims in": X.shape[1]})
-            E[(vname, pos)] = (*decompose(P, Q), jsd(Q, P))
-    rows, drows = [], []
+            E[(vname, pos)] = (*decompose(P, Q), jsd(Q, P), norm_entropy(Q))
+    hp, emo = norm_entropy(P), d.intended.to_numpy()
+    EMOS = sorted(set(emo))
+    within = lambda h, idx: float(np.nanmean([spearman(h[idx][emo[idx] == e], hp[idx][emo[idx] == e]) for e in EMOS]))
+    rows, drows, erows = [], [], []
     for vname in VARIANTS:
         for pos in ("pre", "post"):
-            er, ea, j = E[(vname, pos)]
+            er, ea, j, h = E[(vname, pos)]
             rows.append({"variant": vname, "position": "before merger MLP" if pos == "pre" else "after merger MLP",
-                         "KL": boot(lambda i: (er[i] + ea[i]).mean()), "E_ref": boot(lambda i: er[i].mean()), "E_alt": boot(lambda i: ea[i].mean()),
-                         "JSD V": boot(lambda i: j[i].mean())})
-        r0, a0, _ = E[(vname, "pre")]
-        r1, a1, _ = E[(vname, "post")]
+                         "rho_within (mean over emotions)": boot(lambda i: within(h, i)),
+                         "partial Spearman": boot(lambda i: partial_spearman(h[i], hp[i], emo[i])),
+                         "JSD V": boot(lambda i: j[i].mean()), "KL": boot(lambda i: (er[i] + ea[i]).mean()),
+                         "E_ref": boot(lambda i: er[i].mean()), "E_alt": boot(lambda i: ea[i].mean())})
+        r0, a0, j0, h0 = E[(vname, "pre")]
+        r1, a1, j1, h1 = E[(vname, "post")]
         st = {}
-        for name, fn in (("Delta_alt", lambda i: (a1[i] - a0[i]).mean()), ("Delta_ref", lambda i: (r1[i] - r0[i]).mean()),
+        for name, fn in (("Delta_within", lambda i: within(h1, i) - within(h0, i)),
+                         ("Delta_partial", lambda i: partial_spearman(h1[i], hp[i], emo[i]) - partial_spearman(h0[i], hp[i], emo[i])),
+                         ("Delta_JSD", lambda i: (j1[i] - j0[i]).mean()), ("Delta_KL", lambda i: (r1[i] + a1[i] - r0[i] - a0[i]).mean()),
+                         ("Delta_alt", lambda i: (a1[i] - a0[i]).mean()), ("Delta_ref", lambda i: (r1[i] - r0[i]).mean()),
                          ("I = Delta_alt - Delta_ref", lambda i: (a1[i] - a0[i]).mean() - (r1[i] - r0[i]).mean())):
-            s = np.array([fn(i) for i in boot.samples])
-            st[name] = (fn(boot.all), *np.nanpercentile(s, [2.5, 97.5]))
-        da, di = st["Delta_alt"], st["I = Delta_alt - Delta_ref"]
-        dr = st["Delta_ref"]
-        if da[1] > 0 and di[1] > 0:
-            read = "Delta_alt > 0 and I > 0"
-        elif da[1] > 0 and dr[1] > 0:
-            read = "both parts worse, no clear difference (I not > 0)"
-        elif da[1] > 0:
-            read = "Delta_alt > 0, I not clearly > 0"
-        else:
-            read = "Delta_alt not > 0"
-        drows.append({"variant": vname, **{n: "{:.4f} [{:.4f}, {:.4f}]".format(*v) for n, v in st.items()}, "reading": read})
+            smp = np.array([fn(i) for i in boot.samples])
+            st[name] = (fn(boot.all), *np.nanpercentile(smp, [2.5, 97.5]))
+        drows.append({"variant": vname, **{n: "{:.4f} [{:.4f}, {:.4f}]".format(*v) for n, v in st.items()},
+                      "_dw": st["Delta_within"], "_dk": st["Delta_KL"], "_dj": st["Delta_JSD"]})
+        for e in EMOS:
+            sel = np.flatnonzero(emo == e)
+            be = Bootstrap(actors[sel], N_BOOT)
+            erows.append({"variant": vname, "intended emotion": e, "clips": len(sel),
+                          "Spearman before": round(float(spearman(h0[sel], hp[sel])), 4), "Spearman after": round(float(spearman(h1[sel], hp[sel])), 4),
+                          "difference (after - before)": be(lambda i: spearman(h1[sel][i], hp[sel][i]) - spearman(h0[sel][i], hp[sel][i])),
+                          "Delta_alt": be(lambda i: (a1[sel][i] - a0[sel][i]).mean()), "Delta_ref": be(lambda i: (r1[sel][i] - r0[sel][i]).mean())})
+    main_v = "main: mean, PCA 256"
+    dw = {r["variant"]: r["_dw"] for r in drows}
+    signs = {np.sign(v[0]) for v in dw.values()}
+    m = dw[main_v]
+    other_worse = any(r["_dk"][1] > 0 or r["_dj"][1] > 0 for r in drows if r["variant"] == main_v)
+    if len(signs) > 1:
+        overall = "the sign of Delta_within changes across variants: the merger effect is not separated from aggregation and readout"
+    elif m[2] < 0:
+        overall = "Delta_within clearly < 0 (main), same sign in the sensitivity variants: premise for an ambiguity-specific intervention at this position"
+    elif other_worse:
+        overall = "only KL / JSD worse after the merger MLP, Delta_within not clearly < 0: not enough to develop an ambiguity method at the merger"
+    else:
+        overall = "no degradation of the within-emotion ranking: stop the merger direction"
+    for r in drows:
+        for k in ("_dw", "_dk", "_dj"):
+            r.pop(k)
     tables["probes"] = pd.DataFrame(rows)
     tables["deltas"] = pd.DataFrame(drows)
-    reads = {r["reading"] for r in drows}
-    overall = ("supports the selective-degradation hypothesis for this measurement (stable across the sensitivity analyses)" if reads == {"Delta_alt > 0 and I > 0"}
-               else "Delta_alt not > 0 in any variant: no premise for a preservation loss at this position" if reads == {"Delta_alt not > 0"}
-               else "the result depends on pooling / PCA: the merger effect is not separated from aggregation and readout" if len(reads) > 1
-               else f"stable across variants: {next(iter(reads))}")
+    tables["by_emotion"] = pd.DataFrame(erows)
     tables["overall"] = pd.DataFrame([{"overall": overall, "clips": int(keep.sum())}])
     tables["selection"] = pd.DataFrame(sel_rows)
     lines = ["# Step 1: decodability of the vote structure before and after the merger MLP (base model, V)\n",
