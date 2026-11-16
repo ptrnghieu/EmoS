@@ -4361,7 +4361,10 @@ MODEL_KIND = os.environ.get("MODEL_KIND", "base")  # base | m3 | s1_noI | v_only
 FOLD = int(os.environ.get("FOLD", 0))              # m3 / s1_noI: the outer fold whose actors are read
 VIEW = os.environ.get("VIEW", "A0")                # A0 | A1 | A2 | A3
 CONDITION = os.environ.get("CONDITION", "V")       # V: video only (experiment B) | AV: video + audio (Stage C readouts)
-SAVE_GRID = MODEL_KIND == "base" and VIEW == "A0" and CONDITION == "V"  # token grid for the attention-pooling probe
+# Step 1 of the merger check (16/11/2026): input of the merger MLP (after ln_q, 2x2 patches concatenated, 5120-d) and
+# its output (3584-d), mean and SD over the token groups of the clip; base model, A0, video only, every clip.
+MERGER_IO = bool(int(os.environ.get("MERGER_IO", 0)))
+SAVE_GRID = MODEL_KIND == "base" and VIEW == "A0" and CONDITION == "V" and not MERGER_IO  # token grid for the attention-pooling probe
 GRID = 4                     # GRID x GRID cells per temporal patch
 N_OUTER, SPLIT_SEED = 3, 0   # the Stage 1 folds
 LORA_R, LORA_ALPHA, LORA_DROPOUT = 16, 32, 0.05
@@ -4375,7 +4378,8 @@ ALL_CLIPS = MODEL_KIND == "v_only"
 assert not ALL_CLIPS or CONDITION == "V", "v_only is read under V only"
 assert MODEL_KIND == "base" or VIEW == "A0", "the adapters were trained on A0 and are read with A0 only"
 assert CONDITION in ("V", "AV") and (CONDITION == "V" or VIEW == "A0"), "AV is read with A0 only"
-RUN_NAME = f"vprobe_{MODEL_KIND}_{VIEW}" + ("_AV" if CONDITION == "AV" else "") + ("" if MODEL_KIND == "base" else f"_f{FOLD}") + ("_all" if ALL_CLIPS else "")
+assert not MERGER_IO or (MODEL_KIND == "base" and VIEW == "A0" and CONDITION == "V"), "MERGER_IO: base, A0, V"
+RUN_NAME = f"vprobe_{MODEL_KIND}_{VIEW}" + ("_AV" if CONDITION == "AV" else "") + ("" if MODEL_KIND == "base" else f"_f{FOLD}") + ("_all" if ALL_CLIPS else "") + ("_mio" if MERGER_IO else "")
 OUT_DIR = Path(os.environ.get("OUT_DIR", f"/kaggle/working/{RUN_NAME}"))
 T_START = time.time()
 
@@ -4461,6 +4465,15 @@ def on_layer(module, args, out, i):
 
 
 base.visual.register_forward_hook(on_visual)
+if MERGER_IO:
+    mg = base.visual.merger
+    assert mg.hidden_size == base.config.vision_config.hidden_size * MERGE ** 2 == 5120, (mg.hidden_size, MERGE)
+    assert mg.mlp[-1].out_features == base.config.text_config.hidden_size == 3584
+    mg.mlp.register_forward_pre_hook(lambda m, a: HIDDEN.__setitem__("mio_in", a[0].detach().float()))
+    mg.mlp.register_forward_hook(lambda m, a, o: HIDDEN.__setitem__("mio_out", o.detach().float()))
+    trained = [n for n, p in model.named_parameters() if ".visual." in n and "lora" in n.lower()]
+    assert not trained, trained
+    print("merger I/O hooks: input", mg.hidden_size, "-> output", mg.mlp[-1].out_features)
 for i in LAYERS:
     layers[i - 1].register_forward_hook(lambda mod, args, out, i=i: on_layer(mod, args, out, i))
 base.model.norm.register_forward_hook(lambda mod, args, out: HIDDEN.__setitem__("norm", out[0, -1].float().cpu()))
@@ -4560,9 +4573,16 @@ def read(row):
     logits = model(**inputs, use_cache=False).logits[0, -1].float()
     merged = HIDDEN.pop("visual")
     assert len(merged) == int(MASK["video"].sum()), "video tokens and vision encoder output differ in number"
+    mio = {}
+    if MERGER_IO:
+        x_in, x_out = HIDDEN.pop("mio_in"), HIDDEN.pop("mio_out")
+        assert x_in.shape == (len(merged), 5120) and x_out.shape == (len(merged), 3584), (x_in.shape, x_out.shape)
+        assert torch.allclose(x_out.mean(0), merged.mean(0), atol=1e-3), "merger output and visual tokens differ"
+        mio = {"pre_mean": x_in.mean(0), "pre_std": x_in.std(0, unbiased=False), "post_mean": x_out.mean(0), "post_std": x_out.std(0, unbiased=False)}
+        mio = {k: v.cpu().numpy().astype(np.float16) for k, v in mio.items()}
     rec = {k: v.numpy().astype(np.float16) for k, v in HIDDEN.items()}
     rec.update(vis=merged.mean(0).cpu().numpy().astype(np.float16), logits=logits[label_first_ids].cpu().numpy(),
-               lse=np.float32(torch.logsumexp(logits, -1).item()), n_video_tokens=np.int32(len(merged)))
+               lse=np.float32(torch.logsumexp(logits, -1).item()), n_video_tokens=np.int32(len(merged)), **mio)
     if SAVE_GRID:
         rec["grid"] = grid_tokens(merged, inputs["video_grid_thw"])
     return rec
@@ -4605,7 +4625,7 @@ for j, (_, row) in enumerate(todo.iterrows()):
 flush()
 (OUT_DIR / "meta.json").write_text(json.dumps({
     "model": MODEL_ID, "model_kind": MODEL_KIND, "fold": FOLD if MODEL_KIND != "base" else None, "all_clips": ALL_CLIPS, "view": VIEW, "condition": CONDITION,
-    "adapter": ADAPTER, "layers": LAYERS, "labels": LABELS, "grid": GRID if SAVE_GRID else None,
+    "adapter": ADAPTER, "merger_io": MERGER_IO, "layers": LAYERS, "labels": LABELS, "grid": GRID if SAVE_GRID else None,
     "frame_max_pixels": FRAME_MAX_PIXELS, "oom_this_run": n_oom}, indent=1))
 """),
     md("## Check"),
