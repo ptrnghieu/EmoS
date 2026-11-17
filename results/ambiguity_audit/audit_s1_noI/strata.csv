@@ -1,0 +1,15 @@
+comparator,group,n_clips,coverage,n_actors
+hse_mlp,all,7438,1.0,91
+hse_mlp,baseline_correct,4495,0.6043291207313795,91
+hse_mlp,both_correct,3845,0.5169400376445281,91
+hse_mlp,baseline_only_correct,650,0.08738908308685131,88
+hse_mlp,comparator_only_correct,1065,0.1431836515192256,91
+hse_mlp,neither_unique_correct,1412,0.18983597741328315,91
+hse_mlp,human_tied_majority,466,0.06265125033611185,91
+teacher,all,7438,1.0,91
+teacher,baseline_correct,4495,0.6043291207313795,91
+teacher,both_correct,3910,0.5256789459532132,91
+teacher,baseline_only_correct,585,0.07865017477816617,86
+teacher,comparator_only_correct,1051,0.14130142511427804,91
+teacher,neither_unique_correct,1426,0.1917182038182307,91
+teacher,human_tied_majority,466,0.06265125033611185,91
