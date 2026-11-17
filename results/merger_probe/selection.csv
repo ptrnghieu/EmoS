@@ -1,0 +1,19 @@
+variant,position,fold,lambda,converged,dims in
+"main: mean, PCA 256",pre,0,0.01,True,5120
+"main: mean, PCA 256",pre,1,0.01,True,5120
+"main: mean, PCA 256",pre,2,0.0001,True,5120
+"main: mean, PCA 256",post,0,0.01,True,3584
+"main: mean, PCA 256",post,1,0.01,True,3584
+"main: mean, PCA 256",post,2,0.01,True,3584
+"sensitivity: mean + SD, PCA 256",pre,0,0.01,True,10240
+"sensitivity: mean + SD, PCA 256",pre,1,0.01,True,10240
+"sensitivity: mean + SD, PCA 256",pre,2,0.0001,True,10240
+"sensitivity: mean + SD, PCA 256",post,0,0.01,True,7168
+"sensitivity: mean + SD, PCA 256",post,1,0.01,True,7168
+"sensitivity: mean + SD, PCA 256",post,2,0.01,True,7168
+"sensitivity: mean, no PCA",pre,0,0.1,False,5120
+"sensitivity: mean, no PCA",pre,1,0.1,False,5120
+"sensitivity: mean, no PCA",pre,2,0.1,False,5120
+"sensitivity: mean, no PCA",post,0,0.1,False,3584
+"sensitivity: mean, no PCA",post,1,0.1,False,3584
+"sensitivity: mean, no PCA",post,2,0.1,False,3584
